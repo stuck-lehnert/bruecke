@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 3 ]; then
+	echo "usage: bruecke-wg-apply-peer <interface> <public-key> <allowed-ip>" >&2
+	exit 2
+fi
+
+interface="$1"
+public_key="$2"
+allowed_ip="$3"
+
+wg set "$interface" peer "$public_key" allowed-ips "$allowed_ip"

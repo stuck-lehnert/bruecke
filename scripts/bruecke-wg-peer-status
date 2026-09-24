@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+	echo "usage: bruecke-wg-peer-status <interface>" >&2
+	exit 2
+fi
+
+interface="$1"
+
+wg show "$interface" latest-handshakes

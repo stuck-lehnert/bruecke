@@ -1,0 +1,421 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+pick_runtime() {
+	if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+		printf '%s\n' podman
+		return
+	fi
+	if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+		printf '%s\n' docker
+		return
+	fi
+	printf '%s\n' "usable podman or docker is required" >&2
+	exit 1
+}
+
+is_true() {
+	case "${1:-}" in
+		1|true|TRUE|yes|YES|y|Y) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+json_string() {
+	local value="$1"
+	value=${value//\\/\\\\}
+	value=${value//\"/\\\"}
+	value=${value//$'\n'/\\n}
+	printf '"%s"' "$value"
+}
+
+json_file() {
+	awk 'BEGIN { printf "\"" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); printf "%s\\n", $0 } END { printf "\"" }' "$1"
+}
+
+remove_container() {
+	local name="$1"
+	if "$runtime" container inspect "$name" >/dev/null 2>&1; then
+		"$runtime" rm -f "$name" >/dev/null
+	fi
+}
+
+ensure_network() {
+	if ! "$runtime" network inspect "$network_name" >/dev/null 2>&1; then
+		"$runtime" network create "$network_name" >/dev/null
+	fi
+}
+
+generate_root_cert() {
+	local root_cn="$1"
+	local root_key="$data_dir/dev-root.key"
+	local root_crt="$data_dir/dev-root.pem"
+	local root_der="$data_dir/dev-root.der"
+
+	if command -v openssl >/dev/null 2>&1; then
+		openssl req -x509 -newkey rsa:2048 -nodes \
+			-keyout "$root_key" \
+			-out "$root_crt" \
+			-days 3650 \
+			-sha256 \
+			-subj "/CN=$root_cn" \
+			-addext 'basicConstraints=critical,CA:TRUE' \
+			-addext 'keyUsage=critical,keyCertSign,cRLSign' >/dev/null 2>&1
+		openssl x509 -in "$root_crt" -outform DER -out "$root_der"
+		openssl dgst -sha256 -r "$root_der" | cut -d ' ' -f 1 > "$data_dir/dev-root.id"
+		return
+	fi
+
+	"$runtime" run --rm \
+		-v "$data_dir:/data" \
+		-e DEV_ROOT_CN="$root_cn" \
+		alpine:3.20 \
+		sh -lc 'set -eu; apk add --no-cache openssl >/dev/null; openssl req -x509 -newkey rsa:2048 -nodes -keyout /data/dev-root.key -out /data/dev-root.pem -days 3650 -sha256 -subj "/CN=$DEV_ROOT_CN" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1; openssl x509 -in /data/dev-root.pem -outform DER -out /data/dev-root.der; openssl dgst -sha256 -r /data/dev-root.der | cut -d " " -f 1 > /data/dev-root.id'
+}
+
+generate_wg_publics() {
+	local count="$1"
+	"$runtime" run --rm --entrypoint /bin/sh "$image_name" -lc "set -eu; i=0; while [ \$i -lt $count ]; do wg genkey | wg pubkey; i=\$((i + 1)); done"
+}
+
+seed_data() {
+	local now root_after root_cn root_id root_pem_json ovpn_config ovpn_json
+	local client1 client2 client3 client4
+	local client1_id client2_id client3_id client4_id
+	local client_after
+	local root_subject
+
+	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	root_after=$(date -u -d '+10 years' +%Y-%m-%dT%H:%M:%SZ)
+	client_after=$(date -u -d '+1 year' +%Y-%m-%dT%H:%M:%SZ)
+	root_cn="bruecke-dev-root-$(date -u +%s)"
+	root_subject="CN=$root_cn"
+
+	mkdir -p "$data_dir"
+	generate_root_cert "$root_cn"
+	if [ ! -s "$data_dir/dev-root.id" ] || [ ! -s "$data_dir/dev-root.pem" ]; then
+		printf '%s\n' "root certificate generation failed; check container volume access to $data_dir" >&2
+		exit 1
+	fi
+	root_id=$(tr -d '\n' < "$data_dir/dev-root.id")
+	root_pem_json=$(json_file "$data_dir/dev-root.pem")
+
+	mapfile -t wg_keys < <(generate_wg_publics 5)
+	server_pub="${wg_keys[0]}"
+	client1="${wg_keys[1]}"
+	client2="${wg_keys[2]}"
+	client3="${wg_keys[3]}"
+	client4="${wg_keys[4]}"
+	printf '%s\n' "$server_pub" > "$data_dir/wg-server.pub"
+
+	client1_id="dev-laptop.corp.example|$root_id"
+	client2_id="ops-db.corp.example|$root_id"
+	client3_id="kiosk-01.corp.example|$root_id"
+	client4_id="build-agent.corp.example|$root_id"
+
+	cat > "$data_dir/settings.json" <<EOF
+{
+  "wg_cidr": "10.44.0.0/24",
+  "wg_server_ip": "10.44.0.1",
+  "wg_ipv6_cidr": "fd44:44:44::/64",
+  "wg_ipv6_server_ip": "fd44:44:44::1",
+  "dns_servers": ["9.9.9.9", "1.1.1.1"],
+  "search_domain": "corp.example"
+}
+EOF
+
+	cat > "$data_dir/root-certs.json" <<EOF
+{
+  "version": 1,
+  "certificates": {
+    "$root_id": {
+      "id": "$root_id",
+      "name": "Dev Domain Root",
+      "pem": $root_pem_json,
+      "subject": "$root_subject",
+      "issuer": "$root_subject",
+      "serial": "dev-$root_id",
+      "not_before": "$now",
+      "not_after": "$root_after",
+      "enabled": true,
+      "created_at": "$now",
+      "updated_at": "$now"
+    }
+  }
+}
+EOF
+
+	cat > "$data_dir/bruecke.json" <<EOF
+{
+  "version": 2,
+  "clients": {
+    "$client1_id": {
+      "id": "$client1_id",
+      "hostname": "dev-laptop.corp.example",
+      "domain_id": "$root_id",
+      "domain_name": "Dev Domain",
+      "ip": "10.44.0.2",
+      "ipv6": "fd44:44:44::2",
+      "public_key": "$client1",
+      "remote_subnet_ids": ["dev-remote-site"],
+      "certificate_subject": "CN=dev-laptop.corp.example",
+      "certificate_serial": "1001",
+      "certificate_not_after": "$client_after",
+      "created_at": "$now",
+      "updated_at": "$now"
+    },
+    "$client2_id": {
+      "id": "$client2_id",
+      "hostname": "ops-db.corp.example",
+      "domain_id": "$root_id",
+      "domain_name": "Dev Domain",
+      "ip": "10.44.0.3",
+      "ipv6": "fd44:44:44::3",
+      "public_key": "$client2",
+      "certificate_subject": "CN=ops-db.corp.example",
+      "certificate_serial": "1002",
+      "certificate_not_after": "$client_after",
+      "created_at": "$now",
+      "updated_at": "$now"
+    },
+    "$client3_id": {
+      "id": "$client3_id",
+      "hostname": "kiosk-01.corp.example",
+      "domain_id": "$root_id",
+      "domain_name": "Dev Domain",
+      "ip": "10.44.0.4",
+      "ipv6": "fd44:44:44::4",
+      "public_key": "$client3",
+      "disabled": true,
+      "certificate_subject": "CN=kiosk-01.corp.example",
+      "certificate_serial": "1003",
+      "certificate_not_after": "$client_after",
+      "created_at": "$now",
+      "updated_at": "$now"
+    },
+    "$client4_id": {
+      "id": "$client4_id",
+      "hostname": "build-agent.corp.example",
+      "domain_id": "$root_id",
+      "domain_name": "Dev Domain",
+      "ip": "10.44.0.5",
+      "ipv6": "fd44:44:44::5",
+      "public_key": "$client4",
+      "certificate_subject": "CN=build-agent.corp.example",
+      "certificate_serial": "1004",
+      "certificate_not_after": "$client_after",
+      "created_at": "$now",
+      "updated_at": "$now"
+    }
+  },
+  "groups": {
+    "custom:ops": {
+      "id": "custom:ops",
+      "name": "Ops",
+      "type": "custom",
+      "client_ids": ["$client1_id", "$client2_id"],
+      "created_at": "$now",
+      "updated_at": "$now"
+    },
+    "custom:lab": {
+      "id": "custom:lab",
+      "name": "Lab devices",
+      "type": "custom",
+      "client_ids": ["$client3_id", "$client4_id"],
+      "created_at": "$now",
+      "updated_at": "$now"
+    }
+  },
+  "policy_rules": [
+    {
+      "id": "rule:dev-all-dns",
+      "name": "All clients DNS",
+      "group_id": "all",
+      "dns_servers": ["9.9.9.9", "1.1.1.1"],
+      "search_domain": "corp.example",
+      "created_at": "$now",
+      "updated_at": "$now"
+    },
+    {
+      "id": "rule:dev-domain-pool",
+      "name": "Domain pool preview",
+      "group_id": "root:$root_id",
+      "wg_cidr": "10.60.0.0/24",
+      "wg_ipv6_cidr": "fd60:60::/64",
+      "created_at": "$now",
+      "updated_at": "$now"
+    },
+    {
+      "id": "rule:dev-ops-dns",
+      "name": "Ops DNS override",
+      "group_id": "custom:ops",
+      "dns_servers": ["10.10.10.10"],
+      "search_domain": "ops.corp.example",
+      "created_at": "$now",
+      "updated_at": "$now"
+    }
+  ]
+}
+EOF
+
+	ovpn_config=$(cat <<EOF
+client
+dev tun
+proto udp
+remote $remote_container_name 1194
+nobind
+persist-key
+persist-tun
+pull-filter ignore "redirect-gateway"
+verb 3
+EOF
+)
+	ovpn_json=$(json_string "$ovpn_config")
+	cat > "$data_dir/remote-subnets.json" <<EOF
+{
+  "version": 1,
+  "subnets": {
+    "dev-remote-site": {
+      "id": "dev-remote-site",
+      "name": "Dev site-to-site target",
+      "config_type": "ovpn",
+      "source_filename": "dev-site.ovpn",
+      "subnets": ["172.28.50.0/24"],
+      "client_ids": ["$client4_id"],
+      "group_ids": ["custom:ops"],
+      "enabled": true,
+      "ovpn_config": $ovpn_json,
+      "created_at": "$now",
+      "updated_at": "$now"
+    }
+  }
+}
+EOF
+}
+
+script_path="${BASH_SOURCE[0]}"
+script_dir="${script_path%/*}"
+if [ "$script_dir" = "$script_path" ]; then
+	script_dir="."
+fi
+repo_dir=$(cd "$script_dir/.." && pwd -P)
+
+runtime=${BRUECKE_RUNTIME:-$(pick_runtime)}
+image_name=${BRUECKE_DEV_IMAGE:-bruecke:dev}
+container_name=${BRUECKE_DEV_CONTAINER:-bruecke-dev}
+remote_container_name=${BRUECKE_DEV_REMOTE_CONTAINER:-bruecke-dev-remote}
+network_name=${BRUECKE_DEV_NETWORK:-bruecke-dev}
+data_dir=${BRUECKE_DEV_DATA_DIR:-$repo_dir/.dev/data}
+http_port=${BRUECKE_DEV_PORT:-8080}
+remote_port=${BRUECKE_DEV_REMOTE_PORT:-18081}
+admin_password=${BRUECKE_DEV_ADMIN_PASSWORD:-123456}
+
+if [ -n "${BRUECKE_DEV_ADMIN_HASH:-}" ]; then
+	admin_hash="$BRUECKE_DEV_ADMIN_HASH"
+elif [ "$admin_password" = "123456" ]; then
+	admin_hash='$2y$10$PX7PKTihu3XLKuKCF45IjuMxW7jXQia3NAyQ5NyCGx4Mur0VMMcTK'
+else
+	printf '%s\n' "custom BRUECKE_DEV_ADMIN_PASSWORD requires BRUECKE_DEV_ADMIN_HASH" >&2
+	exit 1
+fi
+
+printf 'runtime: %s\n' "$runtime"
+printf 'building image: %s\n' "$image_name"
+"$runtime" build -t "$image_name" "$repo_dir"
+
+if is_true "${BRUECKE_DEV_RESET:-}"; then
+	case "$data_dir" in
+		""|"/"|"$repo_dir") printf '%s\n' "refusing to reset unsafe data dir: $data_dir" >&2; exit 1 ;;
+	esac
+	rm -rf "$data_dir"
+fi
+mkdir -p "$data_dir"
+
+if [ ! -s "$data_dir/bruecke.json" ] || [ ! -s "$data_dir/root-certs.json" ] || [ ! -s "$data_dir/remote-subnets.json" ]; then
+	printf 'seeding dev data: %s\n' "$data_dir"
+	seed_data
+elif [ -s "$data_dir/wg-server.pub" ]; then
+	server_pub=$(tr -d '\n' < "$data_dir/wg-server.pub")
+else
+	server_pub=$(generate_wg_publics 1)
+	printf '%s\n' "$server_pub" > "$data_dir/wg-server.pub"
+fi
+
+ensure_network
+remove_container "$container_name"
+remove_container "$remote_container_name"
+
+remote_started=0
+server_started=0
+cleanup() {
+	local status=$?
+	trap - EXIT INT TERM
+	if [ "$remote_started" = 1 ] || [ "$server_started" = 1 ]; then
+		printf '\nstopping dev containers...\n'
+		if [ "$server_started" = 1 ]; then
+			"$runtime" rm -f "$container_name" >/dev/null 2>&1 || true
+		fi
+		if [ "$remote_started" = 1 ]; then
+			"$runtime" rm -f "$remote_container_name" >/dev/null 2>&1 || true
+		fi
+	fi
+	exit "$status"
+}
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap cleanup EXIT
+
+printf 'starting dummy site-to-site target: %s\n' "$remote_container_name"
+remote_started=1
+"$runtime" run -d --rm \
+	--name "$remote_container_name" \
+	--network "$network_name" \
+	-p "$remote_port:8081" \
+	alpine:3.20 \
+	sh -lc 'set -eu; while true; do printf "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 22\r\n\r\nbruecke-dev-remote-ok\n" | nc -l -p 8081; done' >/dev/null
+
+printf 'starting bruecke dev server: %s\n' "$container_name"
+server_started=1
+"$runtime" run -d --rm \
+	--name "$container_name" \
+	--network "$network_name" \
+	-p "$http_port:8080" \
+	-v "$data_dir:/data" \
+	-e BRUECKE_ADDR=:8080 \
+	-e BRUECKE_ADMIN_COOKIE_SECURE=false \
+	-e BRUECKE_APPLY_WG=false \
+	-e BRUECKE_APPLY_REMOTE_SUBNETS=false \
+	-e BRUECKE_WG_ENDPOINT=localhost:51820 \
+	-e BRUECKE_WG_SERVER_PUBLIC_KEY="$server_pub" \
+	-e ADMIN_HASH="$admin_hash" \
+	"$image_name" >/dev/null
+
+health_ok=0
+for _ in {1..30}; do
+	if [ "$("$runtime" exec "$container_name" wget -qO- http://127.0.0.1:8080/healthz 2>/dev/null || true)" = "ok" ]; then
+		health_ok=1
+		break
+	fi
+	sleep 1
+done
+
+if [ "$health_ok" != 1 ]; then
+	printf '%s\n' "bruecke dev server did not become healthy" >&2
+	"$runtime" logs "$container_name" >&2 || true
+	exit 1
+fi
+
+cat <<EOF
+
+bruecke dev preview ready.
+
+Admin UI: http://localhost:$http_port/
+Admin password: $admin_password
+Dummy remote target: http://localhost:$remote_port/
+Data dir: $data_dir
+
+Reset seed data: BRUECKE_DEV_RESET=1 scripts/dev
+Press Ctrl-C to stop both containers.
+EOF
+
+"$runtime" logs -f "$container_name"

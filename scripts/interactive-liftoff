@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+pick_runtime() {
+	if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+		echo docker
+		return
+	fi
+	if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+		echo podman
+		return
+	fi
+	echo "usable docker or podman is required" >&2
+	exit 1
+}
+
+prompt() {
+	local label="$1"
+	local default_value="${2:-}"
+	local value=""
+	if [ -n "$default_value" ]; then
+		printf '%s [%s]: ' "$label" "$default_value" >&2
+	else
+		printf '%s: ' "$label" >&2
+	fi
+	read -r value
+	if [ -z "$value" ]; then
+		value="$default_value"
+	fi
+	printf '%s' "$value"
+}
+
+prompt_required() {
+	local label="$1"
+	local value=""
+	while [ -z "$value" ]; do
+		value=$(prompt "$label")
+	done
+	printf '%s' "$value"
+}
+
+yes_no() {
+	local label="$1"
+	local answer=""
+	printf '%s [y/N]: ' "$label" >&2
+	read -r answer
+	case "$answer" in
+		y|Y|yes|YES) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+generate_password() {
+	if command -v openssl >/dev/null 2>&1; then
+		openssl rand -base64 24 | tr -d '=+/\n' | cut -c 1-24
+		return
+	fi
+	local password=""
+	while [ "${#password}" -lt 24 ]; do
+		password="$password$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24 || true)"
+	done
+	printf '%s' "${password:0:24}"
+}
+
+script_path="${BASH_SOURCE[0]}"
+script_dir="${script_path%/*}"
+if [ "$script_dir" = "$script_path" ]; then
+	script_dir="."
+fi
+repo_dir=$(cd "$script_dir/.." && pwd -P)
+data_dir="$repo_dir/data"
+runtime=$(pick_runtime)
+
+echo "bruecke interactive liftoff"
+echo "runtime: $runtime"
+echo "persistent data mount: $data_dir:/data"
+echo
+
+container_name=$(prompt "Container name" "bruecke")
+image_name=$(prompt "Image name" "bruecke:latest")
+public_host=$(prompt_required "Public hostname/domain/IP for HTTPS and WireGuard")
+wg_port=$(prompt "WireGuard UDP port" "51820")
+wg_cidr=$(prompt "WireGuard IPv4 pool" "10.44.0.0/24")
+wg_server_ip=$(prompt "WireGuard server tunnel IP" "10.44.0.1")
+wg_ipv6_cidr=$(prompt "WireGuard IPv6 pool" "fd44:44:44::/64")
+wg_ipv6_server_ip=$(prompt "WireGuard server tunnel IPv6" "fd44:44:44::1")
+admin_password=$(generate_password)
+
+case "$wg_cidr" in
+	*/*) ;;
+	*) echo "WireGuard IPv4 pool must include prefix length, e.g. 10.44.0.0/24" >&2; exit 1 ;;
+esac
+case "$wg_ipv6_cidr" in
+	*/*) ;;
+	*) echo "WireGuard IPv6 pool must include prefix length, e.g. fd44:44:44::/64" >&2; exit 1 ;;
+esac
+endpoint_host="$public_host"
+url_host="$public_host"
+case "$public_host" in
+	*:* )
+		case "$public_host" in
+			\[*\]) ;;
+			*) endpoint_host="[$public_host]"; url_host="[$public_host]" ;;
+		esac
+		;;
+esac
+wg_endpoint="$endpoint_host:$wg_port"
+
+if "$runtime" container inspect "$container_name" >/dev/null 2>&1; then
+	if yes_no "Container '$container_name' exists. Replace it?"; then
+		"$runtime" rm -f "$container_name" >/dev/null
+	else
+		echo "aborted" >&2
+		exit 1
+	fi
+fi
+
+echo
+echo "Building image $image_name..."
+"$runtime" build -t "$image_name" "$repo_dir"
+
+mkdir -p "$data_dir"
+
+echo "Generating WireGuard server key if missing..."
+server_pub=$("$runtime" run --rm \
+	--entrypoint /bin/sh \
+	-v "$data_dir:/data" \
+	"$image_name" \
+	-lc 'set -eu; umask 077; if [ ! -s /data/wg-server.key ]; then wg genkey > /data/wg-server.key; fi; wg pubkey < /data/wg-server.key > /data/wg-server.pub; cat /data/wg-server.pub')
+
+echo "Hashing admin password..."
+admin_hash=$("$runtime" run --rm -i \
+	alpine:3.20 \
+	sh -lc 'set -eu; apk add --no-cache apache2-utils >/dev/null; IFS= read -r password; htpasswd -bnBC 12 "" "$password" | tr -d ":\n"' <<<"$admin_password")
+
+echo "Starting $container_name..."
+"$runtime" run -d \
+	--name "$container_name" \
+	--restart=always \
+	--cap-add NET_ADMIN \
+	--device /dev/net/tun \
+	--sysctl net.ipv4.ip_forward=1 \
+	--sysctl net.ipv6.conf.all.forwarding=1 \
+	-p 80:80/tcp \
+	-p 443:443/tcp \
+	-p "$wg_port:$wg_port/udp" \
+	-v "$data_dir:/data" \
+	-e BRUECKE_TLS_TERMINATE=true \
+	-e BRUECKE_WG_ENDPOINT="$wg_endpoint" \
+	-e BRUECKE_WG_SERVER_PUBLIC_KEY="$server_pub" \
+	-e BRUECKE_WG_CIDR="$wg_cidr" \
+	-e BRUECKE_WG_SERVER_IP="$wg_server_ip" \
+	-e BRUECKE_WG_IPV6_CIDR="$wg_ipv6_cidr" \
+	-e BRUECKE_WG_IPV6_SERVER_IP="$wg_ipv6_server_ip" \
+	-e BRUECKE_WG_OUTBOUND_INTERFACE=auto \
+	-e ADMIN_HASH="$admin_hash" \
+	"$image_name"
+
+cat <<EOF
+
+bruecke launched.
+
+Admin UI: https://$url_host/
+Admin password: $admin_password
+WireGuard endpoint: $wg_endpoint
+Persistent data: $data_dir
+
+Root CAs are managed in admin UI. Upload at least one domain root CA before client enrollment.
+EOF

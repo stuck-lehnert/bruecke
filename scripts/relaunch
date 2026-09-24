@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+pick_runtime() {
+	if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+		printf '%s\n' docker
+		return
+	fi
+	if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+		printf '%s\n' podman
+		return
+	fi
+	printf '%s\n' "usable docker or podman is required" >&2
+	exit 1
+}
+
+inspect_value() {
+	local format="$1"
+	local name="$2"
+	"$runtime" inspect --format "$format" "$name" 2>/dev/null || true
+}
+
+append_lines() {
+	local target_name="$1"
+	local text="$2"
+	local line=""
+	while IFS= read -r line; do
+		if [ -n "$line" ] && [ "$line" != "<no value>" ]; then
+			case "$target_name" in
+				env_lines) env_lines+=("$line") ;;
+				binds) binds+=("$line") ;;
+				ports) ports+=("$line") ;;
+				caps) caps+=("$line") ;;
+				devices) devices+=("$line") ;;
+				sysctls) sysctls+=("$line") ;;
+			esac
+		fi
+	done <<<"$text"
+}
+
+env_value() {
+	local key="$1"
+	local line=""
+	for line in "${env_lines[@]}"; do
+		case "$line" in
+			"$key="*) printf '%s' "${line#*=}"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+has_sysctl() {
+	local key="$1"
+	local line=""
+	for line in "${sysctls[@]}"; do
+		case "$line" in
+			"$key="*) return 0 ;;
+		esac
+	done
+	return 1
+}
+
+script_path="${BASH_SOURCE[0]}"
+script_dir="${script_path%/*}"
+if [ "$script_dir" = "$script_path" ]; then
+	script_dir="."
+fi
+repo_dir=$(cd "$script_dir/.." && pwd -P)
+runtime=${BRUECKE_RUNTIME:-$(pick_runtime)}
+container_name=${BRUECKE_CONTAINER:-bruecke}
+stop_timeout=${BRUECKE_RELAUNCH_STOP_TIMEOUT:-20}
+settle_seconds=${BRUECKE_RELAUNCH_SETTLE_SECONDS:-3}
+
+if ! "$runtime" inspect "$container_name" >/dev/null 2>&1; then
+	printf 'container not found: %s\n' "$container_name" >&2
+	exit 1
+fi
+
+image_name=${BRUECKE_IMAGE:-$(inspect_value '{{.Config.Image}}' "$container_name")}
+if [ -z "$image_name" ] || [ "$image_name" = "<no value>" ]; then
+	image_name=bruecke:latest
+fi
+
+env_lines=()
+binds=()
+ports=()
+caps=()
+devices=()
+sysctls=()
+append_lines env_lines "$(inspect_value '{{range .Config.Env}}{{println .}}{{end}}' "$container_name")"
+append_lines binds "$(inspect_value '{{range .HostConfig.Binds}}{{println .}}{{end}}' "$container_name")"
+append_lines ports "$(inspect_value '{{range $container, $bindings := .HostConfig.PortBindings}}{{range $bindings}}{{if .HostIp}}{{.HostIp}}:{{end}}{{.HostPort}}:{{$container}}{{println}}{{end}}{{end}}' "$container_name")"
+append_lines caps "$(inspect_value '{{range .HostConfig.CapAdd}}{{println .}}{{end}}' "$container_name")"
+append_lines devices "$(inspect_value '{{range .HostConfig.Devices}}{{.PathOnHost}}:{{.PathInContainer}}{{if .CgroupPermissions}}:{{.CgroupPermissions}}{{end}}{{println}}{{end}}' "$container_name")"
+append_lines sysctls "$(inspect_value '{{range $key, $value := .HostConfig.Sysctls}}{{printf "%s=%s\n" $key $value}}{{end}}' "$container_name")"
+
+if [ "${#binds[@]}" -eq 0 ]; then
+	append_lines binds "$(inspect_value '{{range .Mounts}}{{.Source}}:{{.Destination}}{{if not .RW}}:ro{{end}}{{println}}{{end}}' "$container_name")"
+fi
+has_sysctl net.ipv4.ip_forward || sysctls+=(net.ipv4.ip_forward=1)
+has_sysctl net.ipv6.conf.all.forwarding || sysctls+=(net.ipv6.conf.all.forwarding=1)
+
+network_mode=$(inspect_value '{{.HostConfig.NetworkMode}}' "$container_name")
+restart_name=$(inspect_value '{{.HostConfig.RestartPolicy.Name}}' "$container_name")
+restart_max=$(inspect_value '{{.HostConfig.RestartPolicy.MaximumRetryCount}}' "$container_name")
+privileged=$(inspect_value '{{.HostConfig.Privileged}}' "$container_name")
+user_name=$(inspect_value '{{.Config.User}}' "$container_name")
+workdir=$(inspect_value '{{.Config.WorkingDir}}' "$container_name")
+
+printf 'pulling latest source in %s\n' "$repo_dir"
+if [ "${BRUECKE_RELAUNCH_PULL:-true}" != "false" ]; then
+	git -C "$repo_dir" pull --ff-only
+fi
+
+printf 'building image %s\n' "$image_name"
+"$runtime" build -t "$image_name" "$repo_dir"
+
+run_args=(--name "$container_name")
+if [ -n "$restart_name" ] && [ "$restart_name" != "<no value>" ] && [ "$restart_name" != "no" ]; then
+	if [ "$restart_name" = "on-failure" ] && [ -n "$restart_max" ] && [ "$restart_max" != "0" ] && [ "$restart_max" != "<no value>" ]; then
+		run_args+=(--restart="${restart_name}:${restart_max}")
+	else
+		run_args+=(--restart="$restart_name")
+	fi
+fi
+if [ "$privileged" = "true" ]; then
+	run_args+=(--privileged)
+fi
+case "$network_mode" in
+	''|'<no value>'|'default'|'bridge') ;;
+	*) run_args+=(--network "$network_mode") ;;
+esac
+if [ -n "$user_name" ] && [ "$user_name" != "<no value>" ]; then
+	run_args+=(--user "$user_name")
+fi
+if [ -n "$workdir" ] && [ "$workdir" != "<no value>" ]; then
+	run_args+=(--workdir "$workdir")
+fi
+for cap in "${caps[@]}"; do
+	run_args+=(--cap-add "$cap")
+done
+for device in "${devices[@]}"; do
+	run_args+=(--device "$device")
+done
+for sysctl in "${sysctls[@]}"; do
+	run_args+=(--sysctl "$sysctl")
+done
+for port in "${ports[@]}"; do
+	run_args+=(-p "$port")
+done
+for bind in "${binds[@]}"; do
+	run_args+=(-v "$bind")
+done
+for line in "${env_lines[@]}"; do
+	run_args+=(-e "$line")
+done
+
+backup_name="${container_name}.previous.$(date +%Y%m%d%H%M%S)"
+
+printf 'swapping container %s\n' "$container_name"
+"$runtime" stop -t "$stop_timeout" "$container_name" >/dev/null
+"$runtime" rename "$container_name" "$backup_name"
+
+restore_old() {
+	printf '%s\n' "new container failed; restoring previous container" >&2
+	"$runtime" rm -f "$container_name" >/dev/null 2>&1 || true
+	"$runtime" rename "$backup_name" "$container_name" >/dev/null 2>&1 || true
+	"$runtime" start "$container_name" >/dev/null 2>&1 || true
+}
+
+if ! "$runtime" run -d "${run_args[@]}" "$image_name" >/dev/null; then
+	restore_old
+	exit 1
+fi
+
+sleep "$settle_seconds"
+if [ "$(inspect_value '{{.State.Running}}' "$container_name")" != "true" ]; then
+	"$runtime" logs "$container_name" >&2 || true
+	restore_old
+	exit 1
+fi
+
+"$runtime" rm "$backup_name" >/dev/null
+printf 'bruecke relaunched: %s (%s)\n' "$container_name" "$image_name"

@@ -1,0 +1,7 @@
+.git
+bruecked
+*.test
+/data
+/.dev/
+web/node_modules
+web/dist

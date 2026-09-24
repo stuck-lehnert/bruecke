@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+pick_runtime() {
+	if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+		printf '%s\n' docker
+		return
+	fi
+	if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+		printf '%s\n' podman
+		return
+	fi
+	printf '%s\n' "usable docker or podman is required" >&2
+	exit 1
+}
+
+inspect_value() {
+	local format="$1"
+	local name="$2"
+	"$runtime" inspect --format "$format" "$name" 2>/dev/null || true
+}
+
+append_image() {
+	local image="$1"
+	local existing=""
+	local i=0
+	if [ -z "$image" ] || [ "$image" = "<no value>" ]; then
+		return
+	fi
+	while [ "$i" -lt "${#images[@]}" ]; do
+		existing="${images[$i]}"
+		if [ "$existing" = "$image" ]; then
+			return
+		fi
+		i=$((i + 1))
+	done
+	images+=("$image")
+}
+
+yes_no() {
+	local label="$1"
+	local answer=""
+	if [ ! -t 0 ]; then
+		printf '%s [y/N]: n\n' "$label" >&2
+		return 1
+	fi
+	printf '%s [y/N]: ' "$label" >&2
+	read -r answer
+	case "$answer" in
+		y|Y|yes|YES) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+append_data_target() {
+	local kind="$1"
+	local value="$2"
+	local i=0
+	if [ -z "$value" ] || [ "$value" = "<no value>" ]; then
+		return
+	fi
+	while [ "$i" -lt "${#data_values[@]}" ]; do
+		if [ "${data_kinds[$i]}" = "$kind" ] && [ "${data_values[$i]}" = "$value" ]; then
+			return
+		fi
+		i=$((i + 1))
+	done
+	data_kinds+=("$kind")
+	data_values+=("$value")
+}
+
+append_bind_data_target() {
+	local path="$1"
+	if [ -z "$path" ] || [ "$path" = "<no value>" ]; then
+		return
+	fi
+	if [ -f "$path/.git" ] || [ -d "$path/.git" ] || { [ -f "$path/go.mod" ] && [ -d "$path/scripts" ]; }; then
+		if [ -d "$path/data" ]; then
+			append_data_target dir "$path/data"
+		else
+			printf 'data bind source looks like repo root; keeping %s\n' "$path"
+		fi
+		return
+	fi
+	append_data_target dir "$path"
+}
+
+container_data_dir() {
+	local name="$1"
+	local line=""
+	local data_dir="/data"
+	while IFS= read -r line; do
+		case "$line" in
+			BRUECKE_DATA_DIR=*) data_dir="${line#*=}" ;;
+		esac
+	done <<<"$(inspect_value '{{range .Config.Env}}{{println .}}{{end}}' "$name")"
+	printf '%s\n' "$data_dir"
+}
+
+append_container_data_targets() {
+	local name="$1"
+	local data_dir="$2"
+	local line=""
+	local destination=""
+	local source=""
+	local mount_type=""
+	local volume_name=""
+	local prefix=""
+	local suffix=""
+	while IFS=$'\t' read -r destination source mount_type volume_name; do
+		if [ -z "$destination" ]; then
+			continue
+		fi
+		case "$data_dir" in
+			"$destination")
+				data_mount_seen=true
+				case "$mount_type" in
+					volume) append_data_target volume "$volume_name" ;;
+					*) append_bind_data_target "$source" ;;
+				esac
+				;;
+			"$destination"/*)
+				data_mount_seen=true
+				if [ "$mount_type" = "volume" ]; then
+					printf 'data dir is inside volume %s; keeping volume\n' "$volume_name"
+				elif [ "$destination" != "/" ]; then
+					prefix="$destination/"
+					suffix="${data_dir#$prefix}"
+					append_bind_data_target "$source/$suffix"
+				fi
+				;;
+		esac
+	done <<<"$(inspect_value '{{range .Mounts}}{{printf "%s\t%s\t%s\t%s\n" .Destination .Source .Type .Name}}{{end}}' "$name")"
+}
+
+runtime=${BRUECKE_RUNTIME:-$(pick_runtime)}
+container_name=${BRUECKE_CONTAINER:-bruecke}
+cleanup_images=${BRUECKE_CLEANUP_IMAGES:-true}
+images=()
+data_kinds=()
+data_values=()
+container_found=false
+data_mount_seen=false
+
+if "$runtime" container inspect "$container_name" >/dev/null 2>&1; then
+	container_found=true
+	data_dir=$(container_data_dir "$container_name")
+	append_container_data_targets "$container_name" "$data_dir"
+	image_ref=$(inspect_value '{{.Config.Image}}' "$container_name")
+	if [ -n "$image_ref" ] && [ "$image_ref" != "<no value>" ]; then
+		append_image "$image_ref"
+	else
+		append_image "$(inspect_value '{{.Image}}' "$container_name")"
+	fi
+	printf 'removing container %s\n' "$container_name"
+	"$runtime" rm -f "$container_name" >/dev/null
+else
+	printf 'container not found: %s\n' "$container_name"
+fi
+
+if [ -n "${BRUECKE_IMAGE:-}" ]; then
+	append_image "$BRUECKE_IMAGE"
+elif [ "$container_found" = false ]; then
+	append_image bruecke:latest
+fi
+
+if [ -n "${BRUECKE_EXTRA_IMAGES:-}" ]; then
+	old_ifs="$IFS"
+	IFS=,
+	for image in $BRUECKE_EXTRA_IMAGES; do
+		IFS="$old_ifs"
+		append_image "$image"
+		IFS=,
+	done
+	IFS="$old_ifs"
+fi
+
+if [ "$cleanup_images" != "false" ]; then
+	i=0
+	while [ "$i" -lt "${#images[@]}" ]; do
+		image="${images[$i]}"
+		if "$runtime" image inspect "$image" >/dev/null 2>&1; then
+			printf 'removing image %s\n' "$image"
+			"$runtime" rmi "$image" >/dev/null
+		else
+			printf 'image not found: %s\n' "$image"
+		fi
+		i=$((i + 1))
+	done
+fi
+
+if [ "${#data_values[@]}" -eq 0 ] && [ "$data_mount_seen" = true ]; then
+	printf '%s\n' "no removable data mount found; persistent data left untouched"
+elif [ "${#data_values[@]}" -eq 0 ]; then
+	printf '%s\n' "data mount not found; persistent data left untouched"
+else
+	i=0
+	while [ "$i" -lt "${#data_values[@]}" ]; do
+		kind="${data_kinds[$i]}"
+		value="${data_values[$i]}"
+		case "$kind" in
+			volume)
+				if yes_no "Remove data volume $value?"; then
+					printf 'removing data volume %s\n' "$value"
+					"$runtime" volume rm "$value" >/dev/null
+				else
+					printf 'keeping data volume %s\n' "$value"
+				fi
+				;;
+			*)
+				if yes_no "Remove data dir $value?"; then
+					printf 'removing data dir %s\n' "$value"
+					rm -rf -- "$value"
+				else
+					printf 'keeping data dir %s\n' "$value"
+				fi
+				;;
+		esac
+		i=$((i + 1))
+	done
+fi
+
+printf '%s\n' "cleanup complete"

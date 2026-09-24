@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ]; then
+	echo "usage: bruecke-wg-remove-peer <interface> <public-key>" >&2
+	exit 2
+fi
+
+interface="$1"
+public_key="$2"
+
+if wg show "$interface" peers | grep -Fxq "$public_key"; then
+	wg set "$interface" peer "$public_key" remove
+fi

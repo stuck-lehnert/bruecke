@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ] && [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; then
+	echo "usage: bruecke-wg-down <interface> [outbound-interface client-ipv4-cidr [client-ipv6-cidr]]" >&2
+	exit 2
+fi
+
+interface="$1"
+outbound_interface="${2:-}"
+client_ipv4_cidr="${3:-}"
+client_ipv6_cidr="${4:-}"
+
+detect_outbound_interface() {
+	set -- $(ip -4 route show default 2>/dev/null || true)
+	while [ "$#" -gt 0 ]; do
+		if [ "$1" = "dev" ]; then
+			shift
+			if [ "$#" -gt 0 ]; then
+				printf '%s\n' "$1"
+				return 0
+			fi
+		fi
+		shift
+	done
+	return 1
+}
+
+if [ -n "$outbound_interface" ] && [ "$outbound_interface" != "-" ] && [ "$outbound_interface" != "none" ] && command -v iptables >/dev/null 2>&1; then
+	if [ "$outbound_interface" = "auto" ]; then
+		outbound_interface=$(detect_outbound_interface || true)
+	fi
+	if [ -n "$outbound_interface" ] && [ -n "$client_ipv4_cidr" ] && [ "$client_ipv4_cidr" != "-" ]; then
+		old_ifs="$IFS"
+		IFS=,
+		for cidr in $client_ipv4_cidr; do
+			IFS="$old_ifs"
+			[ -n "$cidr" ] || continue
+			while iptables -t nat -C POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1; do
+				iptables -t nat -D POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1 || break
+			done
+			IFS=,
+		done
+		IFS="$old_ifs"
+		while iptables -C FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1; do
+			iptables -D FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1 || break
+		done
+		while iptables -C FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1; do
+			iptables -D FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 || break
+		done
+	fi
+	if [ -n "$outbound_interface" ] && [ -n "$client_ipv6_cidr" ] && [ "$client_ipv6_cidr" != "-" ] && command -v ip6tables >/dev/null 2>&1; then
+		old_ifs="$IFS"
+		IFS=,
+		for cidr in $client_ipv6_cidr; do
+			IFS="$old_ifs"
+			[ -n "$cidr" ] || continue
+			while ip6tables -t nat -C POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1; do
+				ip6tables -t nat -D POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1 || break
+			done
+			IFS=,
+		done
+		IFS="$old_ifs"
+		while ip6tables -C FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1; do
+			ip6tables -D FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1 || break
+		done
+		while ip6tables -C FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1; do
+			ip6tables -D FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 || break
+		done
+	fi
+fi
+
+if ip link show dev "$interface" >/dev/null 2>&1; then
+	ip link delete dev "$interface"
+fi

@@ -1,0 +1,134 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 4 ] && [ "$#" -ne 5 ] && [ "$#" -ne 6 ] && [ "$#" -ne 7 ]; then
+	echo "usage: bruecke-wg-up <interface> <address-cidrs> <listen-port> <private-key-file> [outbound-interface] [client-ipv4-cidr] [client-ipv6-cidr]" >&2
+	exit 2
+fi
+
+interface="$1"
+address_cidrs="$2"
+listen_port="$3"
+private_key_file="$4"
+outbound_interface="${5:-}"
+client_ipv4_cidr="${6:-}"
+client_ipv6_cidr="${7:-}"
+
+detect_outbound_interface() {
+	set -- $(ip -4 route show default 2>/dev/null || true)
+	while [ "$#" -gt 0 ]; do
+		if [ "$1" = "dev" ]; then
+			shift
+			if [ "$#" -gt 0 ]; then
+				printf '%s\n' "$1"
+				return 0
+			fi
+		fi
+		shift
+	done
+	return 1
+}
+
+enable_ipv4_forwarding() {
+	if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)" = "1" ]; then
+		return
+	fi
+	if command -v sysctl >/dev/null 2>&1; then
+		sysctl -w net.ipv4.ip_forward=1 >/dev/null || true
+	else
+		printf '1\n' >/proc/sys/net/ipv4/ip_forward || true
+	fi
+	if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)" != "1" ]; then
+		echo "IPv4 forwarding is disabled; set --sysctl net.ipv4.ip_forward=1" >&2
+		exit 1
+	fi
+}
+
+enable_ipv6_forwarding() {
+	if [ "$(cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || true)" = "1" ]; then
+		return
+	fi
+	if command -v sysctl >/dev/null 2>&1; then
+		sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null || true
+	else
+		printf '1\n' >/proc/sys/net/ipv6/conf/all/forwarding || true
+	fi
+	if [ "$(cat /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || true)" != "1" ]; then
+		echo "IPv6 forwarding is disabled; set --sysctl net.ipv6.conf.all.forwarding=1" >&2
+		exit 1
+	fi
+}
+
+setup_gateway() {
+	if [ "$outbound_interface" = "auto" ]; then
+		outbound_interface=$(detect_outbound_interface || true)
+	fi
+	if [ -z "$outbound_interface" ]; then
+		echo "could not detect outbound interface" >&2
+		exit 1
+	fi
+	if ! command -v iptables >/dev/null 2>&1; then
+		echo "iptables is required for WireGuard internet gateway mode" >&2
+		exit 1
+	fi
+	if [ -n "$client_ipv4_cidr" ] && [ "$client_ipv4_cidr" != "-" ]; then
+		enable_ipv4_forwarding
+		old_ifs="$IFS"
+		IFS=,
+		for cidr in $client_ipv4_cidr; do
+			IFS="$old_ifs"
+			[ -n "$cidr" ] || continue
+			iptables -t nat -C POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE 2>/dev/null \
+				|| iptables -t nat -A POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE
+			IFS=,
+		done
+		IFS="$old_ifs"
+		iptables -C FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT 2>/dev/null \
+			|| iptables -A FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT
+		iptables -C FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+			|| iptables -A FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+	fi
+	if [ -n "$client_ipv6_cidr" ] && [ "$client_ipv6_cidr" != "-" ]; then
+		if ! command -v ip6tables >/dev/null 2>&1; then
+			echo "ip6tables is required for WireGuard IPv6 gateway mode" >&2
+			exit 1
+		fi
+		enable_ipv6_forwarding
+		old_ifs="$IFS"
+		IFS=,
+		for cidr in $client_ipv6_cidr; do
+			IFS="$old_ifs"
+			[ -n "$cidr" ] || continue
+			ip6tables -t nat -C POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE 2>/dev/null \
+				|| ip6tables -t nat -A POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE
+			IFS=,
+		done
+		IFS="$old_ifs"
+		ip6tables -C FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT 2>/dev/null \
+			|| ip6tables -A FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT
+		ip6tables -C FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+			|| ip6tables -A FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+	fi
+}
+
+if ! ip link show dev "$interface" >/dev/null 2>&1; then
+	ip link add dev "$interface" type wireguard
+fi
+
+wg set "$interface" private-key "$private_key_file" listen-port "$listen_port"
+old_ifs="$IFS"
+IFS=,
+for address_cidr in $address_cidrs; do
+	IFS="$old_ifs"
+	if [ -n "$address_cidr" ]; then
+		ip address replace "$address_cidr" dev "$interface"
+	fi
+	IFS=,
+done
+IFS="$old_ifs"
+ip link set up dev "$interface"
+
+case "$outbound_interface" in
+	""|"-"|"none") ;;
+	*) setup_gateway ;;
+esac
