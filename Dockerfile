@@ -14,7 +14,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/bruecked ./cmd/bruecked
 
-FROM alpine:3.20
+FROM alpine:3.24
 
 RUN apk add --no-cache ca-certificates iproute2 iptables openvpn wireguard-tools
 COPY --from=build /out/bruecked /usr/local/bin/bruecked
