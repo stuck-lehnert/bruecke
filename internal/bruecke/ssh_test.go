@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +40,13 @@ func sshTestSigner(t *testing.T) ssh.Signer {
 		t.Fatal(err)
 	}
 	return signer
+}
+
+func requireLinuxSSHRuntime(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("SSH runtime requires Linux network tools and file permissions")
+	}
 }
 
 type sshTestAddresses struct {
@@ -394,6 +402,7 @@ func TestAdminSSHClientLifecycle(t *testing.T) {
 }
 
 func TestSSHHostKeyPersistence(t *testing.T) {
+	requireLinuxSSHRuntime(t)
 	path := filepath.Join(t.TempDir(), "hostkey")
 	first, err := loadSSHHostKey(path)
 	if err != nil {
@@ -520,6 +529,7 @@ func TestSSHMultipleConnectionsShareSourceIPs(t *testing.T) {
 }
 
 func TestSSHOpenSSHInterop(t *testing.T) {
+	requireLinuxSSHRuntime(t)
 	if _, err := exec.LookPath("ssh"); err != nil {
 		t.Skip("OpenSSH client is not installed")
 	}
@@ -579,6 +589,7 @@ func TestSSHOpenSSHInterop(t *testing.T) {
 }
 
 func TestSSHDialerBindsSourceWithoutFallback(t *testing.T) {
+	requireLinuxSSHRuntime(t)
 	for _, family := range []struct{ network, listen, source string }{{"tcp4", "127.0.0.1:0", "127.0.0.2"}, {"tcp6", "[::1]:0", "::1"}} {
 		t.Run(family.network, func(t *testing.T) {
 			listener, err := net.Listen(family.network, family.listen)
@@ -625,6 +636,7 @@ func TestSSHDialerBindsSourceWithoutFallback(t *testing.T) {
 }
 
 func TestSSHAddressCommandsAndRollback(t *testing.T) {
+	requireLinuxSSHRuntime(t)
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "commands")
 	t.Setenv("SSH_IP_TEST_LOG", logPath)
@@ -696,6 +708,7 @@ func TestSSHDeletedIdentityCannotInheritRecreatedClient(t *testing.T) {
 }
 
 func TestSSHClientsNeverBecomeWireGuardPeers(t *testing.T) {
+	requireLinuxSSHRuntime(t)
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "peers")
 	t.Setenv("SSH_WG_TEST_LOG", logPath)
@@ -720,6 +733,7 @@ func TestSSHClientsNeverBecomeWireGuardPeers(t *testing.T) {
 // Opt in inside an isolated privileged Linux network namespace. This exercises
 // the real iproute2 address lifecycle and kernel TCP source binding, not mocks.
 func TestSSHNetworkIntegration(t *testing.T) {
+	requireLinuxSSHRuntime(t)
 	if os.Getenv("BRUECKE_TEST_SSH_NETWORK") != "1" {
 		t.Skip("requires isolated NET_ADMIN environment and iproute2")
 	}
