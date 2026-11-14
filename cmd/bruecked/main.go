@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -75,7 +76,24 @@ func main() {
 		cancel()
 	}
 
+	var sshServer *bruecke.SSHServer
+	var sshListener net.Listener
+	if cfg.SSHEnabled {
+		// Bind before touching the shared source-IP interface, so a duplicate
+		// daemon cannot disturb existing SSH connections.
+		sshListener, err = net.Listen("tcp", cfg.SSHAddr)
+		if err != nil {
+			logger.Fatalf("ssh listen: %v", err)
+		}
+		defer sshListener.Close()
+		sshServer, err = bruecke.NewSSHServer(cfg, store, roots, remoteSubnets, logger)
+		if err != nil {
+			logger.Fatalf("ssh: %v", err)
+		}
+		defer sshServer.Close()
+	}
 	app := bruecke.NewServer(cfg, bruecke.ServerDependencies{
+		SSH:           sshServer,
 		Clients:       store,
 		WireGuard:     wg,
 		Roots:         roots,
@@ -123,9 +141,21 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if sshServer != nil {
+		go func() {
+			logger.Printf("bruecke SSH jump host listening on %s", cfg.SSHAddr)
+			if err := sshServer.Serve(sshListener); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Printf("ssh server: %v", err)
+				stop()
+			}
+		}()
+	}
 
 	go func() {
 		<-ctx.Done()
+		if sshServer != nil {
+			_ = sshServer.Close()
+		}
 		remoteShutdownCtx, remoteCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		remoteRuntime.StopAll(remoteShutdownCtx)
 		remoteCancel()

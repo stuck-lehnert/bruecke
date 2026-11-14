@@ -84,6 +84,8 @@ dd { margin: 0; font-size: .875rem; overflow-wrap: anywhere; }
 .remote-access { padding-top: 12px; border-top: 1px solid var(--border); }
 .config-output, .command-block, .log-lines { font: .8rem ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .config-output { width: 100%; }
+.ssh-enrollment { margin-top: 16px; }
+.ssh-fingerprint { margin-top: 6px; overflow-wrap: anywhere; }
 .command-block { padding: 12px; overflow-x: auto; background: var(--surface-secondary); border-radius: 8px; }
 .logs-layout { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(0, 1.4fr); gap: 18px; }
 .log-run { width: 100%; height: auto; min-height: 64px; text-align: left; justify-content: flex-start; }

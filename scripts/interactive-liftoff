@@ -143,6 +143,7 @@ echo "Starting $container_name..."
 	--sysctl net.ipv6.conf.all.forwarding=1 \
 	-p 80:80/tcp \
 	-p 443:443/tcp \
+	-p 8888:8888/tcp \
 	-p "$wg_port:$wg_port/udp" \
 	-v "$data_dir:/data" \
 	-e BRUECKE_TLS_TERMINATE=true \
@@ -163,6 +164,7 @@ bruecke launched.
 Admin UI: https://$url_host/
 Admin password: $admin_password
 WireGuard endpoint: $wg_endpoint
+SSH jump host: $url_host:8888 (public-key clients are created in the admin UI)
 Persistent data: $data_dir
 
 Root CAs are managed in admin UI. Upload at least one domain root CA before client enrollment.

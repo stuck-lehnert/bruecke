@@ -13,6 +13,9 @@ import (
 )
 
 type Config struct {
+	SSHAddr                string
+	SSHHostKeyPath         string
+	SSHEnabled             bool
 	HTTPAddr               string
 	ACMEHTTPAddr           string
 	DataDir                string
@@ -182,6 +185,19 @@ func LoadConfig() (Config, error) {
 	}
 
 	addrDefault := ":8080"
+	sshEnabled, err := getenvBool("BRUECKE_SSH_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	sshAddr := getenv("BRUECKE_SSH_ADDR", ":8888")
+	_, sshPort, err := net.SplitHostPort(sshAddr)
+	if err != nil {
+		return Config{}, fmt.Errorf("BRUECKE_SSH_ADDR: %w", err)
+	}
+	port, err := strconv.Atoi(sshPort)
+	if err != nil || port < 1 || port > 65535 {
+		return Config{}, fmt.Errorf("BRUECKE_SSH_ADDR must use a port between 1 and 65535")
+	}
 	if tlsTerminate {
 		addrDefault = ":443"
 	}
@@ -191,6 +207,9 @@ func LoadConfig() (Config, error) {
 	}
 
 	return Config{
+		SSHAddr:                sshAddr,
+		SSHHostKeyPath:         getenv("BRUECKE_SSH_HOST_KEY_PATH", filepath.Join(dataDir, "ssh_host_ed25519_key")),
+		SSHEnabled:             sshEnabled,
 		HTTPAddr:               getenv("BRUECKE_ADDR", addrDefault),
 		ACMEHTTPAddr:           getenv("BRUECKE_ACME_HTTP_ADDR", ":80"),
 		DataDir:                dataDir,

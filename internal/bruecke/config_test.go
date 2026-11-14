@@ -62,6 +62,9 @@ func TestLoadConfigRejectsPublicURLPath(t *testing.T) {
 
 func setConfigTestEnv(t *testing.T) {
 	t.Helper()
+	t.Setenv("BRUECKE_SSH_ENABLED", "true")
+	t.Setenv("BRUECKE_SSH_ADDR", ":8888")
+	t.Setenv("BRUECKE_SSH_HOST_KEY_PATH", "")
 	t.Setenv("BRUECKE_DATA_DIR", "/data")
 	t.Setenv("BRUECKE_TLS_TERMINATE", "false")
 	t.Setenv("BRUECKE_WG_CIDR", "10.44.0.0/24")
@@ -77,4 +80,32 @@ func setConfigTestEnv(t *testing.T) {
 	t.Setenv("BRUECKE_WG_PRIVATE_KEY_FILE", "")
 	t.Setenv("BRUECKE_WG_OUTBOUND_INTERFACE", "")
 	t.Setenv("BRUECKE_PUBLIC_URL", "")
+}
+
+func TestLoadConfigSSHDefaultsAndOverrides(t *testing.T) {
+	setConfigTestEnv(t)
+	t.Setenv("BRUECKE_WG_ENDPOINT", "vpn.example.com:51820")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SSHEnabled || cfg.SSHAddr != ":8888" || cfg.SSHHostKeyPath != "/data/ssh_host_ed25519_key" {
+		t.Fatalf("SSH defaults %+v", cfg)
+	}
+	t.Setenv("BRUECKE_SSH_ENABLED", "false")
+	t.Setenv("BRUECKE_SSH_ADDR", "127.0.0.1:2222")
+	t.Setenv("BRUECKE_SSH_HOST_KEY_PATH", "/custom/hostkey")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSHEnabled || cfg.SSHAddr != "127.0.0.1:2222" || cfg.SSHHostKeyPath != "/custom/hostkey" {
+		t.Fatalf("SSH overrides %+v", cfg)
+	}
+	for _, addr := range []string{"8888", ":0", ":65536", ":ssh"} {
+		t.Setenv("BRUECKE_SSH_ADDR", addr)
+		if _, err := LoadConfig(); err == nil {
+			t.Errorf("invalid SSH address accepted %s", addr)
+		}
+	}
 }

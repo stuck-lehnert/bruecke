@@ -384,6 +384,7 @@ server_started=1
 	-e BRUECKE_ADDR=:8080 \
 	-e BRUECKE_ADMIN_COOKIE_SECURE=false \
 	-e BRUECKE_APPLY_WG=false \
+	-e BRUECKE_SSH_ENABLED=false \
 	-e BRUECKE_APPLY_REMOTE_SUBNETS=false \
 	-e BRUECKE_WG_ENDPOINT=localhost:51820 \
 	-e BRUECKE_WG_SERVER_PUBLIC_KEY="$server_pub" \

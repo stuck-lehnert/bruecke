@@ -9,7 +9,7 @@ Configure your office networks once and bruecke switches the VPN off on those ne
 ## What you need
 
 - A Linux host with Docker or Podman, access to `/dev/net/tun`, and permission to manage network interfaces and firewall rules.
-- A public hostname for HTTPS and the WireGuard UDP endpoint. The guided setup uses ports `80/tcp`, `443/tcp`, and `51820/udp` by default.
+- A public hostname for HTTPS, the SSH jump host, and the WireGuard UDP endpoint. The guided setup uses ports `80/tcp`, `443/tcp`, `8888/tcp`, and `51820/udp` by default.
 - Domain-joined Windows computers with an AD CS computer certificate that has Client Authentication and an accessible private key. Microsoft Entra `MS-Organization-*` device certificates do not satisfy this requirement.
 - A way to deploy a computer startup script through Group Policy.
 
@@ -33,7 +33,39 @@ Then:
 4. Download the Windows bootstrap script from the admin UI and deploy it as a **computer startup script** through GPO.
 5. Check **Peers** as computers enroll. Use **Bootstrap Logs** if a computer does not appear.
 
-The helper expects the public hostname to resolve to this host and ports `80/tcp`, `443/tcp`, and the selected WireGuard UDP port to be reachable. Port 80 is used for the HTTPS certificate challenge.
+The helper expects the public hostname to resolve to this host and ports `80/tcp`, `443/tcp`, `8888/tcp`, and the selected WireGuard UDP port to be reachable. Port 80 is used for the HTTPS certificate challenge.
+
+## SSH jump-host clients
+
+For SSH access without installing WireGuard on the connecting computer, open **Manual enrollment** in the admin UI and register an **SSH client** with a hostname, a domain, and one public key in OpenSSH `.pub` format. No CA or auto enrollment is required. Keep the private key on the connecting computer; never upload it.
+
+Supported keys are RSA **2048–8192 bits** (including 2048, 3072 and 4096), ECDSA **P-256, P-384, P-521**, and **Ed25519**. Public-key comments are accepted; multiple keys, `authorized_keys` options, SSH certificates, DSA, and weak RSA keys are rejected. RSA authentication uses SHA-2 signatures, not the obsolete SHA-1 `ssh-rsa` signature algorithm. Existing clients cannot be overwritten by provisioning; to replace a key, delete and recreate the SSH client.
+
+The built-in Go SSH server listens on **TCP 8888**. Authentication uses the registered client hostname (or its full client ID) as the SSH username. For example, with an SSH client named `alice-laptop` and a VPN target at `10.44.0.3`:
+
+```sshconfig
+Host bruecke-jump
+    HostName vpn.example.com
+    Port 8888
+    User alice-laptop
+    IdentityFile ~/.ssh/bruecke_jump
+    IdentitiesOnly yes
+
+Host office-pc
+    HostName 10.44.0.3
+    User target-user
+    ProxyJump bruecke-jump
+```
+
+Run `ssh office-pc`. The target still needs its own SSH service, account, and authentication; the jump key only authenticates to bruecke. Alternatively, keep a connection online with `ssh -N -p 8888 -i ~/.ssh/bruecke_jump alice-laptop@vpn.example.com`, or use local TCP forwarding with `-N -L 2222:10.44.0.3:22` and then connect to port 2222 locally.
+
+There is **no shell, PTY, command execution, SFTP/SCP, agent/X11 forwarding, reverse forwarding, Unix-socket forwarding, or SSH VPN/TUN**. Only `direct-tcpip` channels (used by ProxyJump, `-W`, `-L` and `-D`) are implemented. This is not a general-purpose Internet proxy: destinations must be an enabled WireGuard client in the **same domain**, or an enabled remote subnet assigned to the SSH client through the existing client/group permissions. Known VPN clients in other domains and all bridge-local addresses remain blocked, even with a broad remote route. VPN client hostnames (and their domain search-suffix names) resolve internally; remote-subnet destinations currently require an IP address.
+
+SSH clients share the regular client list, groups, remote-subnet assignments, enable/delete actions, and domain IPv4/IPv6 allocation. Each SSH client gets its **own source IPs**, not the bridge's IP: while connected these are installed on the dedicated `br-ssh` dummy interface, and outgoing TCP connections bind to the appropriate address. Normal WireGuard peers therefore see the SSH client's allocated IP; existing remote-subnet NAT rules can still translate traffic to remote networks. These are jump-host identities, not an inbound network interface on the user's computer: SSH clients do not accept inbound connections to their allocated IPs.
+
+Online status reflects authenticated SSH connections, including idle `ssh -N` connections. The last-handshake field records the last successful SSH connection. Up to four connections per identity and 32 simultaneous forwarding channels per connection are allowed; the server admits at most 128 TCP connections including pending handshakes. Handshakes time out after 10 seconds, and keepalives detect dead connections in approximately 40 seconds. Disabling/deleting an SSH client disconnects it; access changes also terminate affected existing forwards within about one second. Source addresses are removed after its last connection closes, and stale addresses on bruecke's marked interface are cleared on restart.
+
+The server generates a persistent Ed25519 host key at `/data/ssh_host_ed25519_key` with mode `0600`. Back it up with `/data` and verify its fingerprint on the first connection (for example `ssh-keygen -lf /data/ssh_host_ed25519_key` on the server). Do not disable host-key checking. SSH networking requires `iproute2` and `NET_ADMIN`, already supplied by the production container setup. Publish `-p 8888:8888/tcp` for custom **or existing** containers; an HTTP reverse proxy does not expose SSH. `scripts/relaunch` preserves old port mappings, so upgrading an older container requires adding this mapping when recreating it. The unprivileged `scripts/dev` UI/demo mode explicitly disables SSH networking.
 
 ## What happens on a computer
 
@@ -111,6 +143,9 @@ Common settings:
 | --- | --- | --- |
 | `BRUECKE_TLS_TERMINATE` | `false` | Serve HTTPS directly using Let's Encrypt; changes the default listen address to `:443`. |
 | `BRUECKE_ADDR` | `:8080` | HTTP listen address, or `:443` with direct HTTPS. |
+| `BRUECKE_SSH_ENABLED` | `true` | Run the public-key-only SSH jump host; set `false` for unprivileged UI/demo-only deployments. |
+| `BRUECKE_SSH_ADDR` | `:8888` | SSH TCP listen address. Publish the corresponding container port. |
+| `BRUECKE_SSH_HOST_KEY_PATH` | `/data/ssh_host_ed25519_key` | Persistent SSH server private host key (mode `0600`). |
 | `BRUECKE_PUBLIC_URL` | Derived from the request | Public origin embedded in downloaded bootstrap scripts. |
 | `BRUECKE_DATA_DIR` | `/data` | Persistent database, domain, log, and runtime files. |
 | `BRUECKE_WG_CLIENT_ALLOWED_IPS` | `0.0.0.0/0, ::/0` | Client routes; change for split tunneling. |
@@ -151,11 +186,19 @@ The dev UI is printed by the script; the default admin password is `123456`. Pre
 
 Build and test directly:
 
+Go **1.26 or newer** is required for the current security-maintained SSH dependency.
+
 ```sh
 cd web && npm install && npm run build
 cd ..
 go test ./...
+go test -race ./...
+node --test web/src/helpers.test.mjs
 ```
+
+The normal Go suite covers real SSH handshakes for RSA/ECDSA/Ed25519, forwarding and denial rules, online state, revocation, address-command rollback, and kernel TCP source binding on loopback. If `ssh` is installed it also checks standard OpenSSH `-W` forwarding and rejection of command execution.
+
+`TestSSHNetworkIntegration` additionally exercises actual dummy-interface source addresses and cleanup with OpenSSH. It is **opt-in**: run it only in an isolated Linux network namespace/container with `NET_ADMIN`, IPv6, `iproute2`, and OpenSSH installed, using `BRUECKE_TEST_SSH_NETWORK=1 go test ./internal/bruecke -run '^TestSSHNetworkIntegration$' -v`. It creates/clears the bruecke-owned `br-ssh` interface; do not run it in a live bruecke network namespace.
 
 For an end-to-end test with Docker or Podman, run `scripts/test-e2e`. It exercises enrollment, VPN egress, remote-subnet access, and peer disabling.
 

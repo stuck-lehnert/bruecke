@@ -13,6 +13,7 @@ import (
 )
 
 type Server struct {
+	ssh      *SSHServer
 	cfg      Config
 	store    ClientRepository
 	wg       WireGuard
@@ -37,6 +38,7 @@ type Server struct {
 func NewServer(cfg Config, deps ServerDependencies) *Server {
 	deps = deps.withDefaults()
 	return &Server{
+		ssh:      deps.SSH,
 		cfg:      cfg,
 		store:    deps.Clients,
 		wg:       deps.WireGuard,
@@ -72,6 +74,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/clients", s.requireAdmin(s.handleAdminClients))
 	mux.HandleFunc("/api/admin/clients/ws", s.requireAdmin(s.handleAdminClientsWebSocket))
 	mux.HandleFunc("/api/admin/manual-enroll", s.requireAdmin(s.handleAdminManualEnroll))
+	mux.HandleFunc("/api/admin/ssh-clients", s.requireAdmin(s.handleAdminSSHClients))
 	mux.HandleFunc("/api/admin/windows-bootstrap.ps1", s.requireAdmin(s.handleAdminWindowsBootstrap))
 	mux.HandleFunc("/api/admin/bootstrap-logs/runs", s.requireAdmin(s.handleAdminBootstrapLogRuns))
 	mux.HandleFunc("/api/admin/bootstrap-logs/runs/", s.requireAdmin(s.handleAdminBootstrapLogRun))

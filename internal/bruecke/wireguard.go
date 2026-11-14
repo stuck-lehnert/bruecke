@@ -94,6 +94,9 @@ func (w *ScriptWireGuard) Sync(ctx context.Context, clients []Client) error {
 		return nil
 	}
 	for _, client := range clients {
+		if client.Type == "ssh" {
+			continue
+		}
 		if err := w.SetPeer(ctx, client.PublicKey, clientAllowedIPs(client), !client.Disabled); err != nil {
 			return fmt.Errorf("sync %s: %w", client.Hostname, err)
 		}

@@ -92,6 +92,7 @@ type VPNEventRepository interface {
 }
 
 type ServerDependencies struct {
+	SSH           *SSHServer
 	Clients       ClientRepository
 	WireGuard     WireGuard
 	Roots         RootRepository

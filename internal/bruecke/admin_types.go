@@ -32,6 +32,8 @@ type adminDomainsResponse struct {
 }
 
 type adminClient struct {
+	Type                string     `json:"type"`
+	SSHFingerprint      string     `json:"ssh_fingerprint,omitempty"`
 	ID                  string     `json:"id"`
 	Hostname            string     `json:"hostname"`
 	DomainID            string     `json:"domain_id,omitempty"`

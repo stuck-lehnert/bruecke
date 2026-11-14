@@ -6,7 +6,7 @@ COPY web/src ./src
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi \
 	&& npm run build
 
-FROM golang:1.22-alpine AS build
+FROM golang:1.26-alpine AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -28,5 +28,5 @@ RUN chmod +x /usr/local/bin/bruecked /usr/local/bin/bruecke-wg-apply-peer /usr/l
 	&& mkdir -p /data
 
 VOLUME ["/data"]
-EXPOSE 80/tcp 443/tcp 8080/tcp 51820/udp
+EXPOSE 80/tcp 443/tcp 8080/tcp 8888/tcp 51820/udp
 ENTRYPOINT ["/usr/local/bin/bruecked"]

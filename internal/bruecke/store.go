@@ -17,6 +17,7 @@ import (
 )
 
 var ErrClientNotFound = errors.New("client not found")
+var ErrClientExists = errors.New("client or SSH public key already exists")
 var ErrGroupNotFound = errors.New("group not found")
 
 const (
@@ -30,6 +31,7 @@ type State struct {
 }
 
 type Client struct {
+	Type                string    `json:"type,omitempty"`
 	ID                  string    `json:"id"`
 	Hostname            string    `json:"hostname"`
 	DomainID            string    `json:"domain_id,omitempty"`
@@ -69,6 +71,7 @@ type GroupView struct {
 }
 
 type Enrollment struct {
+	Type                string
 	ID                  string
 	Hostname            string
 	DomainID            string
@@ -306,6 +309,16 @@ func (s *Store) DeleteGroup(id string) error {
 }
 
 func (s *Store) Rotate(ctx context.Context, enrollment Enrollment, apply func(oldPublicKey, allowedIP string, enabled bool) error) (Client, error) {
+	if enrollment.Type != "" && enrollment.Type != "wireguard" && enrollment.Type != "ssh" {
+		return Client{}, fmt.Errorf("unknown client type")
+	}
+	if enrollment.Type == "ssh" {
+		_, canonical, err := parseSSHPublicKey(enrollment.PublicKey)
+		if err != nil {
+			return Client{}, err
+		}
+		enrollment.PublicKey = canonical
+	}
 	if enrollment.Hostname == "" {
 		return Client{}, fmt.Errorf("hostname is required")
 	}
@@ -340,6 +353,16 @@ func (s *Store) Rotate(ctx context.Context, enrollment Enrollment, apply func(ol
 	}
 
 	current, known := s.state.Clients[enrollment.ID]
+	if known && (current.Type == "ssh" || enrollment.Type == "ssh") {
+		return Client{}, ErrClientExists
+	}
+	if enrollment.Type == "ssh" {
+		for _, client := range s.state.Clients {
+			if client.Type == "ssh" && client.PublicKey == enrollment.PublicKey {
+				return Client{}, ErrClientExists
+			}
+		}
+	}
 	ip := current.IP
 	ipv6 := current.IPv6
 	if known {
@@ -394,6 +417,7 @@ func (s *Store) Rotate(ctx context.Context, enrollment Enrollment, apply func(ol
 	}
 
 	client := Client{
+		Type:                enrollment.Type,
 		ID:                  enrollment.ID,
 		Hostname:            enrollment.Hostname,
 		DomainID:            enrollment.DomainID,
@@ -559,6 +583,7 @@ func (s *Store) saveLocked() error {
 func (s *Store) validateLocked() error {
 	seen := map[string]string{}
 	seenIPv6 := map[string]string{}
+	seenSSHKeys := map[string]string{}
 	server := s.serverIP.String()
 	serverIPv6 := s.ipv6IP.String()
 	clients := map[string]Client{}
@@ -603,6 +628,20 @@ func (s *Store) validateLocked() error {
 		}
 		if client.PublicKey == "" {
 			return fmt.Errorf("stored public key for %s is empty", client.ID)
+		}
+		if client.Type != "" && client.Type != "wireguard" && client.Type != "ssh" {
+			return fmt.Errorf("unknown stored client type for %s", client.ID)
+		}
+		if client.Type == "ssh" {
+			_, canonical, err := parseSSHPublicKey(client.PublicKey)
+			if err != nil {
+				return fmt.Errorf("stored SSH key for %s: %w", client.ID, err)
+			}
+			client.PublicKey = canonical
+			if other, ok := seenSSHKeys[canonical]; ok {
+				return fmt.Errorf("duplicate SSH public key for %s and %s", other, client.ID)
+			}
+			seenSSHKeys[canonical] = client.ID
 		}
 		client.RemoteSubnetIDs = normalizeRemoteSubnetIDs(client.RemoteSubnetIDs)
 		clients[client.ID] = client

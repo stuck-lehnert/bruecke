@@ -30,6 +30,46 @@ export function clientLabel(client) {
   return client.domain_name ? `${client.hostname} (${client.domain_name})` : client.hostname
 }
 
+// Validate the OpenSSH envelope locally; the server remains authoritative for
+// cryptographic validation and duplicate keys/hostnames.
+export function isSupportedSshPublicKey(value) {
+  const match = value.trim().match(/^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(?:256|384|521))[ \t]+([A-Za-z0-9+/]+={0,2})(?:[ \t]+[^\r\n]*)?$/)
+  if (!match || value.length > 16384) return false
+  try {
+    const bytes = Uint8Array.from(atob(match[2]), (character) => character.charCodeAt(0))
+    let offset = 0
+    const read = () => {
+      if (offset + 4 > bytes.length) throw new Error('Invalid SSH field')
+      const length = new DataView(bytes.buffer).getUint32(offset)
+      offset += 4
+      if (length > bytes.length - offset) throw new Error('Invalid SSH field')
+      const field = bytes.slice(offset, offset + length)
+      offset += length
+      return field
+    }
+    const text = (field) => new TextDecoder().decode(field)
+    if (text(read()) !== match[1]) return false
+    let valid = false
+    if (match[1] === 'ssh-ed25519') {
+      valid = read().length === 32
+    } else if (match[1] === 'ssh-rsa') {
+      const exponent = read()
+      const modulus = read()
+      const first = modulus.findIndex((byte) => byte !== 0)
+      const bits = first < 0 ? 0 : (modulus.length - first - 1) * 8 + Math.floor(Math.log2(modulus[first])) + 1
+      valid = exponent.some((byte) => byte !== 0) && bits >= 2048 && bits <= 8192
+    } else {
+      const curve = match[1].slice('ecdsa-sha2-'.length)
+      const curveMatches = text(read()) === curve
+      const point = read()
+      valid = curveMatches && point[0] === 4 && point.length === { nistp256: 65, nistp384: 97, nistp521: 133 }[curve]
+    }
+    return valid && offset === bytes.length
+  } catch {
+    return false
+  }
+}
+
 export function groupLabel(groups, id) {
   const group = groups.find((item) => item.id === id)
   return group?.name || id

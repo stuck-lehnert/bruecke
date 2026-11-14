@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/ssh"
 )
 
 const adminCookieName = "bruecke_admin"
@@ -273,6 +274,9 @@ func (s *Server) handleAdminClient(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodDelete {
 		client, err := s.store.DeleteClient(r.Context(), id, func(client Client) error {
+			if client.Type == "ssh" {
+				return nil
+			}
 			if s.wg == nil {
 				return nil
 			}
@@ -288,6 +292,9 @@ func (s *Server) handleAdminClient(w http.ResponseWriter, r *http.Request) {
 			}
 			http.Error(w, "client delete failed", http.StatusInternalServerError)
 			return
+		}
+		if s.ssh != nil {
+			s.ssh.Disconnect(client.ID)
 		}
 		if s.remote != nil {
 			if err := s.remote.RemoveClient(client.ID); err != nil {
@@ -316,6 +323,9 @@ func (s *Server) handleAdminClient(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if req.Enabled != nil {
 		client, err = s.store.SetClientEnabled(r.Context(), id, *req.Enabled, func(client Client) error {
+			if client.Type == "ssh" {
+				return nil
+			}
 			return s.wg.SetPeer(r.Context(), client.PublicKey, clientAllowedIPs(client), !client.Disabled)
 		})
 	} else {
@@ -331,6 +341,9 @@ func (s *Server) handleAdminClient(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "client update failed", http.StatusInternalServerError)
 		return
+	}
+	if s.ssh != nil {
+		s.ssh.Disconnect(client.ID)
 	}
 	if req.RemoteSubnetIDs != nil {
 		remoteSubnetIDs := req.RemoteSubnetIDs
@@ -783,6 +796,7 @@ func (s *Server) adminAuthenticated(r *http.Request) bool {
 
 func (s *Server) adminClient(client Client, statuses map[string]PeerStatus, now time.Time) adminClient {
 	response := adminClient{
+		Type:                "wireguard",
 		ID:                  client.ID,
 		Hostname:            client.Hostname,
 		DomainID:            client.DomainID,
@@ -798,6 +812,16 @@ func (s *Server) adminClient(client Client, statuses map[string]PeerStatus, now 
 		CertificateNotAfter: client.CertificateNotAfter,
 		CreatedAt:           client.CreatedAt,
 		UpdatedAt:           client.UpdatedAt,
+	}
+	if client.Type == "ssh" {
+		response.Type = "ssh"
+		if key, _, err := parseSSHPublicKey(client.PublicKey); err == nil {
+			response.SSHFingerprint = ssh.FingerprintSHA256(key)
+		}
+		if s.ssh != nil && !client.Disabled {
+			response.Connected, response.LatestHandshake = s.ssh.Status(client.ID)
+		}
+		return response
 	}
 	status, ok := statuses[client.PublicKey]
 	if ok && !status.LatestHandshake.IsZero() {
