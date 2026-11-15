@@ -1,6 +1,9 @@
 package bruecke
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestLoadConfigDerivesWireGuardListenPort(t *testing.T) {
 	setConfigTestEnv(t)
@@ -14,7 +17,7 @@ func TestLoadConfigDerivesWireGuardListenPort(t *testing.T) {
 	if cfg.WGListenPort != 12345 {
 		t.Fatalf("listen port=%d", cfg.WGListenPort)
 	}
-	if cfg.WGPrivateKeyFile != "/data/wg-server.key" {
+	if cfg.WGPrivateKeyFile != filepath.Join("/data", "wg-server.key") {
 		t.Fatalf("private key file=%q", cfg.WGPrivateKeyFile)
 	}
 	if cfg.WGOutboundInterface != "auto" {
@@ -89,7 +92,7 @@ func TestLoadConfigSSHDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.SSHEnabled || cfg.SSHAddr != ":8888" || cfg.SSHHostKeyPath != "/data/ssh_host_ed25519_key" {
+	if !cfg.SSHEnabled || cfg.SSHAddr != ":8888" || cfg.SSHHostKeyPath != filepath.Join("/data", "ssh_host_ed25519_key") {
 		t.Fatalf("SSH defaults %+v", cfg)
 	}
 	t.Setenv("BRUECKE_SSH_ENABLED", "false")
