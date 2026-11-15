@@ -8,6 +8,35 @@ import (
 	"time"
 )
 
+func TestWindowsBootstrapScriptNormalizesCheckoutLineEndings(t *testing.T) {
+	cfg := windowsBootstrapConfig{
+		ServiceBaseURL: "https://vpn.example.com",
+		TunnelName:     "bruecke-vpn-example-com",
+		LogUploadToken: "upload-token",
+	}
+	lfTemplate := strings.ReplaceAll(windowsBootstrapTemplate, "\r", "")
+	want := renderWindowsBootstrapTemplate(lfTemplate, cfg)
+	if strings.Contains(want, "\r") {
+		t.Fatal("rendered bootstrap must use LF line endings")
+	}
+	for _, test := range []struct {
+		name     string
+		template string
+	}{
+		{"LF", lfTemplate},
+		{"CRLF", strings.ReplaceAll(lfTemplate, "\n", "\r\n")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := renderWindowsBootstrapTemplate(test.template, cfg); got != want {
+				t.Fatal("rendered bootstrap differs between LF and CRLF checkouts")
+			}
+		})
+	}
+	if got := renderWindowsBootstrapScript(cfg); got != want {
+		t.Fatal("embedded bootstrap must render identically to the LF template")
+	}
+}
+
 func TestWindowsBootstrapScriptEnrollsAndRunsStartupActuator(t *testing.T) {
 	script := renderWindowsBootstrapScript(windowsBootstrapConfig{ServiceBaseURL: "https://vpn.example.com", TunnelName: "bruecke-vpn-example-com", LogUploadToken: "upload-token"})
 

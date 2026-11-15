@@ -51,12 +51,18 @@ func (s *Server) bootstrapServiceBaseURL(r *http.Request) string {
 }
 
 func renderWindowsBootstrapScript(cfg windowsBootstrapConfig) string {
+	return renderWindowsBootstrapTemplate(windowsBootstrapTemplate, cfg)
+}
+
+func renderWindowsBootstrapTemplate(template string, cfg windowsBootstrapConfig) string {
 	tunnelName := strings.TrimSpace(cfg.TunnelName)
 	if tunnelName == "" {
 		tunnelName = "bruecke"
 	}
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.ServiceBaseURL), "/")
-	template := windowsBootstrapTemplate
+	// Match the former Go raw string literal: carriage returns were discarded.
+	// Embedded files retain CRLF when an editor or checkout converts line endings.
+	template = strings.ReplaceAll(template, "\r", "")
 	replacer := strings.NewReplacer(
 		"__SERVICE_BASE_URL__", psSingleQuoted(baseURL),
 		"__WIREGUARD_INSTALLER_URL__", psSingleQuoted(windowsWireGuardInstallerURL),
