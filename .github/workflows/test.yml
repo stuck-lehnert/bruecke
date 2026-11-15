@@ -59,4 +59,18 @@ jobs:
           cache: true
       - name: Run Go tests and PowerShell fixtures
         shell: powershell
-        run: go test ./...
+        run: |
+          go test -json ./... | Tee-Object -Variable testOutput
+          $testExitCode = $LASTEXITCODE
+          if ($testExitCode -ne 0) {
+            $events = @($testOutput | ForEach-Object { $_ | ConvertFrom-Json })
+            $failures = $events | Where-Object { $_.Action -eq 'fail' -and $_.Test }
+            foreach ($failure in $failures) {
+              $details = ($events | Where-Object {
+                $_.Package -eq $failure.Package -and $_.Test -eq $failure.Test -and $_.Action -eq 'output'
+              }).Output -join ''
+              $message = $details.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error::$message"
+            }
+          }
+          exit $testExitCode
