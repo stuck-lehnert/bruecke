@@ -12,7 +12,7 @@
     "check": "npm run format:check && npm run lint && npm test && npm run build"
   },
   "dependencies": {
-    "@heroui/react": "^3.2.6",
+    "@heroui/react": "^3.2.7",
     "@heroui/styles": "^3.2.6",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "latest",
