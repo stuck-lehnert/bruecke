@@ -297,19 +297,7 @@ func (s *RemoteSubnetStore) RestrictedIDs(ids []string) ([]string, error) {
 }
 
 func (s *RemoteSubnetStore) saveLocked() error {
-	data, err := json.MarshalIndent(s.state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode remote subnet store: %w", err)
-	}
-	data = append(data, '\n')
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write remote subnet store: %w", err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return fmt.Errorf("replace remote subnet store: %w", err)
-	}
-	return nil
+	return writeJSONFile(s.path, "remote subnet store", s.state)
 }
 
 func newRemoteSubnetSpec(name, configType, filename, config string, subnets, clientIDs, groupIDs []string, now time.Time) (RemoteSubnetSpec, error) {
@@ -347,7 +335,21 @@ func newRemoteSubnetSpec(name, configType, filename, config string, subnets, cli
 		return RemoteSubnetSpec{}, err
 	}
 	now = now.UTC()
-	return RemoteSubnetSpec{ID: id, Name: name, ConfigType: configType, SourceFilename: strings.TrimSpace(filename), Subnets: normalizedSubnets, ClientIDs: normalizeIDs(clientIDs), GroupIDs: normalizeIDs(groupIDs), Enabled: true, APCConfig: apc, OVPNConfig: ovpn, OVPNCreds: creds, CreatedAt: now, UpdatedAt: now}, nil
+	return RemoteSubnetSpec{
+		ID:             id,
+		Name:           name,
+		ConfigType:     configType,
+		SourceFilename: strings.TrimSpace(filename),
+		Subnets:        normalizedSubnets,
+		ClientIDs:      normalizeIDs(clientIDs),
+		GroupIDs:       normalizeIDs(groupIDs),
+		Enabled:        true,
+		APCConfig:      apc,
+		OVPNConfig:     ovpn,
+		OVPNCreds:      creds,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}, nil
 }
 
 func normalizeRemoteSubnetSpec(spec RemoteSubnetSpec) (RemoteSubnetSpec, error) {
@@ -426,7 +428,18 @@ func remoteSubnetViewsLocked(subnets map[string]RemoteSubnetSpec) []RemoteSubnet
 }
 
 func remoteSubnetView(spec RemoteSubnetSpec) RemoteSubnetView {
-	return RemoteSubnetView{ID: spec.ID, Name: spec.Name, ConfigType: spec.ConfigType, SourceFilename: spec.SourceFilename, Subnets: append([]string(nil), spec.Subnets...), ClientIDs: append([]string(nil), spec.ClientIDs...), GroupIDs: append([]string(nil), spec.GroupIDs...), Enabled: spec.Enabled, CreatedAt: spec.CreatedAt, UpdatedAt: spec.UpdatedAt}
+	return RemoteSubnetView{
+		ID:             spec.ID,
+		Name:           spec.Name,
+		ConfigType:     spec.ConfigType,
+		SourceFilename: spec.SourceFilename,
+		Subnets:        append([]string(nil), spec.Subnets...),
+		ClientIDs:      append([]string(nil), spec.ClientIDs...),
+		GroupIDs:       append([]string(nil), spec.GroupIDs...),
+		Enabled:        spec.Enabled,
+		CreatedAt:      spec.CreatedAt,
+		UpdatedAt:      spec.UpdatedAt,
+	}
 }
 
 func copyRemoteSubnetSpec(spec RemoteSubnetSpec) RemoteSubnetSpec {

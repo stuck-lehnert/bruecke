@@ -11,7 +11,11 @@ outbound_interface="${2:-}"
 client_ipv4_cidr="${3:-}"
 client_ipv6_cidr="${4:-}"
 
-detect_outbound_interface() {
+detect_outbound_interface() (
+	# Route output is a word list, not a filename pattern.
+	set -f
+	# Deliberately split route fields into arguments.
+	# shellcheck disable=SC2046
 	set -- $(ip -4 route show default 2>/dev/null || true)
 	while [ "$#" -gt 0 ]; do
 		if [ "$1" = "dev" ]; then
@@ -24,49 +28,38 @@ detect_outbound_interface() {
 		shift
 	done
 	return 1
-}
+)
+
+remove_gateway_rules() (
+	firewall="$1"
+	# Split the comma-delimited CIDRs without glob expansion; IFS stays local.
+	IFS=,
+	set -f
+	for cidr in $2; do
+		[ -n "$cidr" ] || continue
+		while "$firewall" -t nat -C POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1; do
+			"$firewall" -t nat -D POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1 || break
+		done
+	done
+	while "$firewall" -C FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1; do
+		"$firewall" -D FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1 || break
+	done
+	while "$firewall" -C FORWARD -i "$outbound_interface" -o "$interface" \
+		-m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1; do
+		"$firewall" -D FORWARD -i "$outbound_interface" -o "$interface" \
+			-m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 || break
+	done
+)
 
 if [ -n "$outbound_interface" ] && [ "$outbound_interface" != "-" ] && [ "$outbound_interface" != "none" ] && command -v iptables >/dev/null 2>&1; then
 	if [ "$outbound_interface" = "auto" ]; then
 		outbound_interface=$(detect_outbound_interface || true)
 	fi
 	if [ -n "$outbound_interface" ] && [ -n "$client_ipv4_cidr" ] && [ "$client_ipv4_cidr" != "-" ]; then
-		old_ifs="$IFS"
-		IFS=,
-		for cidr in $client_ipv4_cidr; do
-			IFS="$old_ifs"
-			[ -n "$cidr" ] || continue
-			while iptables -t nat -C POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1; do
-				iptables -t nat -D POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1 || break
-			done
-			IFS=,
-		done
-		IFS="$old_ifs"
-		while iptables -C FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1; do
-			iptables -D FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1 || break
-		done
-		while iptables -C FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1; do
-			iptables -D FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 || break
-		done
+		remove_gateway_rules iptables "$client_ipv4_cidr"
 	fi
 	if [ -n "$outbound_interface" ] && [ -n "$client_ipv6_cidr" ] && [ "$client_ipv6_cidr" != "-" ] && command -v ip6tables >/dev/null 2>&1; then
-		old_ifs="$IFS"
-		IFS=,
-		for cidr in $client_ipv6_cidr; do
-			IFS="$old_ifs"
-			[ -n "$cidr" ] || continue
-			while ip6tables -t nat -C POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1; do
-				ip6tables -t nat -D POSTROUTING -s "$cidr" -o "$outbound_interface" -j MASQUERADE >/dev/null 2>&1 || break
-			done
-			IFS=,
-		done
-		IFS="$old_ifs"
-		while ip6tables -C FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1; do
-			ip6tables -D FORWARD -i "$interface" -o "$outbound_interface" -j ACCEPT >/dev/null 2>&1 || break
-		done
-		while ip6tables -C FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1; do
-			ip6tables -D FORWARD -i "$outbound_interface" -o "$interface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT >/dev/null 2>&1 || break
-		done
+		remove_gateway_rules ip6tables "$client_ipv6_cidr"
 	fi
 fi
 

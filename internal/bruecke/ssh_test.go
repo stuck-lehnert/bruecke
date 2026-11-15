@@ -355,7 +355,7 @@ func TestAdminSSHClientLifecycle(t *testing.T) {
 	signer := sshTestSigner(t)
 	wg := &recordingDeleteWireGuard{}
 	app := NewServer(Config{}, ServerDependencies{Clients: f.store, Roots: f.roots, WireGuard: wg, SSH: f.server})
-	app.sess["token"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
+	app.sessions["token"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
 	body, _ := json.Marshal(map[string]string{"hostname": "newjump", "domain_id": f.domain.ID, "public_key": string(ssh.MarshalAuthorizedKey(signer.PublicKey()))})
 	request := func(method, path string, body []byte, authenticated bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewReader(body))

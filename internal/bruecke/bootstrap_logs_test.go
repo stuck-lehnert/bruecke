@@ -52,7 +52,7 @@ func TestBootstrapLogUploadAuthAndAdminRead(t *testing.T) {
 		t.Fatalf("upload status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	app.sess["admin"] = adminSession{ExpiresAt: now.Add(time.Hour)}
+	app.sessions["admin"] = adminSession{ExpiresAt: now.Add(time.Hour)}
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/api/admin/bootstrap-logs/runs", nil)
 	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: "admin"})

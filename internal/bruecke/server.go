@@ -13,47 +13,47 @@ import (
 )
 
 type Server struct {
-	ssh      *SSHServer
-	cfg      Config
-	store    ClientRepository
-	wg       WireGuard
-	roots    RootRepository
-	sets     SettingsRepository
-	remote   RemoteSubnetRepository
-	rruntime RemoteSubnetSyncer
-	blogs    BootstrapLogRepository
-	vevents  VPNEventRepository
-	logger   Logger
-	clock    Clock
-	keys     WireGuardKeyGenerator
-	bmu      sync.Mutex
-	btoken   string
-	smu      sync.Mutex
-	sess     map[string]adminSession
-	hmu      sync.Mutex
-	hosts    map[string]enrollmentHandshake
-	hids     map[string]string
+	ssh                  *SSHServer
+	cfg                  Config
+	store                ClientRepository
+	wg                   WireGuard
+	roots                RootRepository
+	settings             SettingsRepository
+	remote               RemoteSubnetRepository
+	remoteRuntime        RemoteSubnetSyncer
+	bootstrapLogs        BootstrapLogRepository
+	vpnEvents            VPNEventRepository
+	logger               Logger
+	clock                Clock
+	keys                 WireGuardKeyGenerator
+	bootstrapTokenMu     sync.Mutex
+	bootstrapToken       string
+	sessionsMu           sync.Mutex
+	sessions             map[string]adminSession
+	handshakesMu         sync.Mutex
+	handshakesByClient   map[string]enrollmentHandshake
+	handshakeClientsByID map[string]string
 }
 
 func NewServer(cfg Config, deps ServerDependencies) *Server {
 	deps = deps.withDefaults()
 	return &Server{
-		ssh:      deps.SSH,
-		cfg:      cfg,
-		store:    deps.Clients,
-		wg:       deps.WireGuard,
-		roots:    deps.Roots,
-		sets:     deps.Settings,
-		remote:   deps.RemoteSubnets,
-		rruntime: deps.RemoteRuntime,
-		blogs:    bootstrapLogRepository(cfg, deps.BootstrapLogs),
-		vevents:  vpnEventRepository(cfg, deps.VPNEvents),
-		logger:   deps.Logger,
-		clock:    deps.Clock,
-		keys:     deps.KeyGenerator,
-		sess:     map[string]adminSession{},
-		hosts:    map[string]enrollmentHandshake{},
-		hids:     map[string]string{},
+		ssh:                  deps.SSH,
+		cfg:                  cfg,
+		store:                deps.Clients,
+		wg:                   deps.WireGuard,
+		roots:                deps.Roots,
+		settings:             deps.Settings,
+		remote:               deps.RemoteSubnets,
+		remoteRuntime:        deps.RemoteRuntime,
+		bootstrapLogs:        bootstrapLogRepository(cfg, deps.BootstrapLogs),
+		vpnEvents:            vpnEventRepository(cfg, deps.VPNEvents),
+		logger:               deps.Logger,
+		clock:                deps.Clock,
+		keys:                 deps.KeyGenerator,
+		sessions:             map[string]adminSession{},
+		handshakesByClient:   map[string]enrollmentHandshake{},
+		handshakeClientsByID: map[string]string{},
 	}
 }
 
@@ -92,8 +92,7 @@ func (s *Server) Routes() http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -106,8 +105,7 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -191,8 +189,8 @@ func (s *Server) dnsConfigLine() string {
 
 func (s *Server) baseVPNSettings() VPNSettings {
 	var settings VPNSettings
-	if s.sets != nil {
-		settings = s.sets.Get()
+	if s.settings != nil {
+		settings = s.settings.Get()
 	} else {
 		settings = SeedVPNSettings(s.cfg)
 	}

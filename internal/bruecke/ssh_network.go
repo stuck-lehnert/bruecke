@@ -94,7 +94,8 @@ func (sshNetwork) Remove(client Client) error {
 
 func dialSSHForward(ctx context.Context, source, target netip.Addr, port uint32) (net.Conn, error) {
 	dialer := net.Dialer{
-		Timeout: 10 * time.Second, KeepAlive: 30 * time.Second,
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
 		LocalAddr: &net.TCPAddr{IP: net.IP(source.AsSlice())},
 	}
 	return dialer.DialContext(ctx, "tcp", net.JoinHostPort(target.String(), strconv.Itoa(int(port))))

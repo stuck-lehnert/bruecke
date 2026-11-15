@@ -189,12 +189,40 @@ Build and test directly:
 Go **1.26 or newer** is required for the current security-maintained SSH dependency.
 
 ```sh
-cd web && npm install && npm run build
+cd web
+npm ci
+npm run check
 cd ..
 go test ./...
 go test -race ./...
-node --test web/src/helpers.test.mjs
+go vet ./...
+scripts/check
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 ```
+
+`npm run check` checks formatting with Prettier, runs ESLint and the Node test suite,
+and builds the production UI. Use `npm run format` from `web/` to format frontend
+changes, and `gofmt -w` on changed Go files. `scripts/check` requires ShellCheck and
+checks shell syntax without running any deployment commands. The Python tests
+require Bash, jq, and ShellCheck and use
+temporary command stubs; they do not start containers or modify network interfaces.
+
+### Code organization and conventions
+
+- Keep modules focused on one responsibility. Admin handlers are grouped by API
+  resource; client persistence, group membership, and HTTP helpers are separate.
+- The Windows bootstrap source lives in `internal/bruecke/windows/bootstrap.ps1`
+  and is embedded in the Go binary with `go:embed`. Edit that file directly rather
+  than adding PowerShell to Go string literals.
+- The React entry point only mounts the app. Feature modules live under
+  `web/src/features/`, reusable UI under `web/src/components/`, and pure data
+  transformations alongside their tests.
+- Prefer descriptive names, early returns, and small functions. Share repeated
+  policy or I/O logic, but avoid wrappers that merely obscure a straightforward call.
+- Preserve API fields, persisted formats, and existing behavior when refactoring;
+  cover changes to validation, permissions, or rollback with regression tests.
+- Use the checked-in EditorConfig and formatter configuration rather than manual
+  formatting preferences. CI runs the same checks listed above.
 
 The normal Go suite covers real SSH handshakes for RSA/ECDSA/Ed25519, forwarding and denial rules, online state, revocation, address-command rollback, and kernel TCP source binding on loopback. If `ssh` is installed it also checks standard OpenSSH `-W` forwarding and rejection of command execution.
 

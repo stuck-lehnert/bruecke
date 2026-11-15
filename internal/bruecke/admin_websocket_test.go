@@ -45,7 +45,7 @@ func TestAdminClientsWebSocketStreamsStatus(t *testing.T) {
 		WireGuard: testWireGuard{statuses: map[string]PeerStatus{client.PublicKey: {LatestHandshake: now}}},
 		Clock:     ClockFunc(func() time.Time { return now }),
 	})
-	app.sess["token"] = adminSession{ExpiresAt: now.Add(time.Hour)}
+	app.sessions["token"] = adminSession{ExpiresAt: now.Add(time.Hour)}
 
 	httpServer := httptest.NewServer(app.Routes())
 	defer httpServer.Close()

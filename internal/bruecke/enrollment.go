@@ -58,8 +58,7 @@ type enrollFinishResponse struct {
 
 func (s *Server) handleEnrollStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -138,8 +137,7 @@ func (s *Server) handleEnrollStart(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -218,7 +216,14 @@ func (s *Server) handleEnrollFinish(w http.ResponseWriter, r *http.Request) {
 		s.logger.Printf("issued hostname=%s ip=%s serial=%s", client.Hostname, client.IP, client.CertificateSerial)
 	}
 	if strings.EqualFold(strings.TrimSpace(req.ResponseFormat), "json") {
-		writeJSON(w, http.StatusOK, enrollFinishResponse{Config: config, LocalNetworks: localNetworks, LocalNetwork: legacyLocalNetwork(localNetworks), ClientID: client.ID, Hostname: client.Hostname, Address: clientAddressLine(client)})
+		writeJSON(w, http.StatusOK, enrollFinishResponse{
+			Config:        config,
+			LocalNetworks: localNetworks,
+			LocalNetwork:  legacyLocalNetwork(localNetworks),
+			ClientID:      client.ID,
+			Hostname:      client.Hostname,
+			Address:       clientAddressLine(client),
+		})
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -297,56 +302,56 @@ func verifyChallengeSignature(cert *x509.Certificate, payload, signature []byte,
 }
 
 func (s *Server) storeHandshake(handshake enrollmentHandshake) {
-	s.hmu.Lock()
-	defer s.hmu.Unlock()
+	s.handshakesMu.Lock()
+	defer s.handshakesMu.Unlock()
 
 	s.cleanupHandshakesLocked(s.now())
 	key := handshakeKey(handshake.Hostname, handshake.DomainID)
-	if oldID, ok := s.hosts[key]; ok {
-		delete(s.hids, oldID.ID)
+	if oldID, ok := s.handshakesByClient[key]; ok {
+		delete(s.handshakeClientsByID, oldID.ID)
 	}
-	s.hosts[key] = handshake
-	s.hids[handshake.ID] = key
+	s.handshakesByClient[key] = handshake
+	s.handshakeClientsByID[handshake.ID] = key
 	time.AfterFunc(enrollmentTTL, func() {
 		s.expireHandshake(key, handshake.ID)
 	})
 }
 
 func (s *Server) takeHandshake(id string) (enrollmentHandshake, bool) {
-	s.hmu.Lock()
-	defer s.hmu.Unlock()
+	s.handshakesMu.Lock()
+	defer s.handshakesMu.Unlock()
 
 	s.cleanupHandshakesLocked(s.now())
-	key, ok := s.hids[id]
+	key, ok := s.handshakeClientsByID[id]
 	if !ok {
 		return enrollmentHandshake{}, false
 	}
-	handshake, ok := s.hosts[key]
+	handshake, ok := s.handshakesByClient[key]
 	if !ok || handshake.ID != id {
-		delete(s.hids, id)
+		delete(s.handshakeClientsByID, id)
 		return enrollmentHandshake{}, false
 	}
-	delete(s.hosts, key)
-	delete(s.hids, id)
+	delete(s.handshakesByClient, key)
+	delete(s.handshakeClientsByID, id)
 	return handshake, true
 }
 
 func (s *Server) expireHandshake(key, id string) {
-	s.hmu.Lock()
-	defer s.hmu.Unlock()
+	s.handshakesMu.Lock()
+	defer s.handshakesMu.Unlock()
 
-	handshake, ok := s.hosts[key]
+	handshake, ok := s.handshakesByClient[key]
 	if ok && handshake.ID == id {
-		delete(s.hosts, key)
-		delete(s.hids, id)
+		delete(s.handshakesByClient, key)
+		delete(s.handshakeClientsByID, id)
 	}
 }
 
 func (s *Server) cleanupHandshakesLocked(now time.Time) {
-	for hostname, handshake := range s.hosts {
+	for hostname, handshake := range s.handshakesByClient {
 		if !now.Before(handshake.ExpiresAt) {
-			delete(s.hosts, hostname)
-			delete(s.hids, handshake.ID)
+			delete(s.handshakesByClient, hostname)
+			delete(s.handshakeClientsByID, handshake.ID)
 		}
 	}
 }

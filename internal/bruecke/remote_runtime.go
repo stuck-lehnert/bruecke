@@ -239,7 +239,12 @@ func runtimeOpenVPNConfig(spec RemoteSubnetSpec, interfaceName string) string {
 		if strings.HasPrefix(trimmed, "pull-filter ignore \"redirect-gateway\"") {
 			hasPullFilter = true
 		}
-		if strings.HasPrefix(trimmed, "dev ") || strings.HasPrefix(trimmed, "dev-type ") || strings.HasPrefix(trimmed, "route ") || strings.HasPrefix(trimmed, "route-ipv6 ") || strings.HasPrefix(trimmed, "daemon") || strings.HasPrefix(trimmed, "auth-user-pass ") || trimmed == "auth-user-pass" {
+		if strings.HasPrefix(trimmed, "dev ") ||
+			strings.HasPrefix(trimmed, "dev-type ") ||
+			strings.HasPrefix(trimmed, "route ") ||
+			strings.HasPrefix(trimmed, "route-ipv6 ") ||
+			strings.HasPrefix(trimmed, "daemon") ||
+			strings.HasPrefix(trimmed, "auth-user-pass ") || trimmed == "auth-user-pass" {
 			continue
 		}
 		builder.WriteString(line)

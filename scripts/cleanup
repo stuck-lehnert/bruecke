@@ -23,16 +23,13 @@ inspect_value() {
 append_image() {
 	local image="$1"
 	local existing=""
-	local i=0
 	if [ -z "$image" ] || [ "$image" = "<no value>" ]; then
 		return
 	fi
-	while [ "$i" -lt "${#images[@]}" ]; do
-		existing="${images[$i]}"
+	for existing in "${images[@]}"; do
 		if [ "$existing" = "$image" ]; then
 			return
 		fi
-		i=$((i + 1))
 	done
 	images+=("$image")
 }
@@ -125,7 +122,7 @@ append_container_data_targets() {
 					printf 'data dir is inside volume %s; keeping volume\n' "$volume_name"
 				elif [ "$destination" != "/" ]; then
 					prefix="$destination/"
-					suffix="${data_dir#$prefix}"
+					suffix="${data_dir#"$prefix"}"
 					append_bind_data_target "$source/$suffix"
 				fi
 				;;
@@ -176,16 +173,13 @@ if [ -n "${BRUECKE_EXTRA_IMAGES:-}" ]; then
 fi
 
 if [ "$cleanup_images" != "false" ]; then
-	i=0
-	while [ "$i" -lt "${#images[@]}" ]; do
-		image="${images[$i]}"
+	for image in "${images[@]}"; do
 		if "$runtime" image inspect "$image" >/dev/null 2>&1; then
 			printf 'removing image %s\n' "$image"
 			"$runtime" rmi "$image" >/dev/null
 		else
 			printf 'image not found: %s\n' "$image"
 		fi
-		i=$((i + 1))
 	done
 fi
 

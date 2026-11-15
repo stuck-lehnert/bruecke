@@ -66,16 +66,36 @@ generate_root_cert() {
 		return
 	fi
 
-	"$runtime" run --rm \
+	"$runtime" run --rm -i \
 		-v "$data_dir:/data" \
 		-e DEV_ROOT_CN="$root_cn" \
 		alpine:3.20 \
-		sh -lc 'set -eu; apk add --no-cache openssl >/dev/null; openssl req -x509 -newkey rsa:2048 -nodes -keyout /data/dev-root.key -out /data/dev-root.pem -days 3650 -sha256 -subj "/CN=$DEV_ROOT_CN" -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1; openssl x509 -in /data/dev-root.pem -outform DER -out /data/dev-root.der; openssl dgst -sha256 -r /data/dev-root.der | cut -d " " -f 1 > /data/dev-root.id'
+		sh -s <<'SHELL'
+set -eu
+apk add --no-cache openssl >/dev/null
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout /data/dev-root.key \
+  -out /data/dev-root.pem \
+  -days 3650 \
+  -sha256 \
+  -subj "/CN=$DEV_ROOT_CN" \
+  -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign,cRLSign' >/dev/null 2>&1
+openssl x509 -in /data/dev-root.pem -outform DER -out /data/dev-root.der
+openssl dgst -sha256 -r /data/dev-root.der | cut -d ' ' -f 1 > /data/dev-root.id
+SHELL
 }
 
 generate_wg_publics() {
 	local count="$1"
-	"$runtime" run --rm --entrypoint /bin/sh "$image_name" -lc "set -eu; i=0; while [ \$i -lt $count ]; do wg genkey | wg pubkey; i=\$((i + 1)); done"
+	"$runtime" run --rm -i --entrypoint /bin/sh "$image_name" -s -- "$count" <<'SHELL'
+set -eu
+i=0
+while [ "$i" -lt "$1" ]; do
+  wg genkey | wg pubkey
+  i=$((i + 1))
+done
+SHELL
 }
 
 seed_data() {
@@ -313,6 +333,8 @@ admin_password=${BRUECKE_DEV_ADMIN_PASSWORD:-123456}
 if [ -n "${BRUECKE_DEV_ADMIN_HASH:-}" ]; then
 	admin_hash="$BRUECKE_DEV_ADMIN_HASH"
 elif [ "$admin_password" = "123456" ]; then
+	# This is a literal bcrypt hash, not shell syntax.
+	# shellcheck disable=SC2016
 	admin_hash='$2y$10$PX7PKTihu3XLKuKCF45IjuMxW7jXQia3NAyQ5NyCGx4Mur0VMMcTK'
 else
 	printf '%s\n' "custom BRUECKE_DEV_ADMIN_PASSWORD requires BRUECKE_DEV_ADMIN_HASH" >&2
@@ -372,7 +394,13 @@ remote_started=1
 	--network "$network_name" \
 	-p "$remote_port:8081" \
 	alpine:3.20 \
-	sh -lc 'set -eu; while true; do printf "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 22\r\n\r\nbruecke-dev-remote-ok\n" | nc -l -p 8081; done' >/dev/null
+	sh -lc '
+set -eu
+while true; do
+  printf "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 22\r\n\r\nbruecke-dev-remote-ok\n" |
+    nc -l -p 8081
+done
+' >/dev/null
 
 printf 'starting bruecke dev server: %s\n' "$container_name"
 server_started=1

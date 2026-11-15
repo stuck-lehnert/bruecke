@@ -175,7 +175,7 @@ func TestWindowsBootstrapScriptEnrollsAndRunsStartupActuator(t *testing.T) {
 
 func TestAdminWindowsBootstrapUsesForwardedPublicURL(t *testing.T) {
 	app := NewServer(Config{WGEndpoint: "vpn.example.com:51820"}, ServerDependencies{})
-	app.sess["token"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
+	app.sessions["token"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/windows-bootstrap.ps1", nil)
 	req.Host = "127.0.0.1:8080"
@@ -205,7 +205,7 @@ func TestAdminWindowsBootstrapUsesForwardedPublicURL(t *testing.T) {
 
 func TestAdminWindowsBootstrapPrefersConfiguredPublicURL(t *testing.T) {
 	app := NewServer(Config{WGEndpoint: "vpn.example.com:51820", PublicURL: "https://enroll.example.com/"}, ServerDependencies{})
-	app.sess["token"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
+	app.sessions["token"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/windows-bootstrap.ps1", nil)
 	req.Host = "internal.example.com"

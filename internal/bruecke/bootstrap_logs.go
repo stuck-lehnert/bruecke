@@ -365,15 +365,14 @@ func limitBootstrapLogString(value string, maxBytes int) string {
 
 func (s *Server) handleBootstrapLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 	if !s.bootstrapLogUploadAuthorized(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if s.blogs == nil {
+	if s.bootstrapLogs == nil {
 		http.Error(w, "bootstrap log store is not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -382,7 +381,7 @@ func (s *Server) handleBootstrapLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	run, err := s.blogs.Append(req, s.now())
+	run, err := s.bootstrapLogs.Append(req, s.now())
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Printf("bootstrap log upload failed run=%s: %v", req.RunID, err)
@@ -395,8 +394,7 @@ func (s *Server) handleBootstrapLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminBootstrapLogRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	limit := bootstrapLogDefaultRunLimit
@@ -408,11 +406,11 @@ func (s *Server) handleAdminBootstrapLogRuns(w http.ResponseWriter, r *http.Requ
 		}
 		limit = parsed
 	}
-	if s.blogs == nil {
+	if s.bootstrapLogs == nil {
 		writeJSON(w, http.StatusOK, bootstrapLogRunsResponse{})
 		return
 	}
-	runs, err := s.blogs.Runs(limit)
+	runs, err := s.bootstrapLogs.Runs(limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -422,8 +420,7 @@ func (s *Server) handleAdminBootstrapLogRuns(w http.ResponseWriter, r *http.Requ
 
 func (s *Server) handleAdminBootstrapLogRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/admin/bootstrap-logs/runs/")
@@ -441,11 +438,11 @@ func (s *Server) handleAdminBootstrapLogRun(w http.ResponseWriter, r *http.Reque
 		}
 		sinceSeq = parsed
 	}
-	if s.blogs == nil {
+	if s.bootstrapLogs == nil {
 		http.NotFound(w, r)
 		return
 	}
-	run, events, err := s.blogs.Run(id, sinceSeq)
+	run, events, err := s.bootstrapLogs.Run(id, sinceSeq)
 	if err != nil {
 		if errors.Is(err, ErrBootstrapLogRunNotFound) {
 			http.NotFound(w, r)
@@ -477,10 +474,10 @@ func (s *Server) bootstrapLogUploadAuthorized(r *http.Request) bool {
 }
 
 func (s *Server) bootstrapLogToken() (string, error) {
-	s.bmu.Lock()
-	defer s.bmu.Unlock()
-	if s.btoken != "" {
-		return s.btoken, nil
+	s.bootstrapTokenMu.Lock()
+	defer s.bootstrapTokenMu.Unlock()
+	if s.bootstrapToken != "" {
+		return s.bootstrapToken, nil
 	}
 	path := strings.TrimSpace(s.cfg.BootstrapLogTokenPath)
 	if path == "" {
@@ -488,13 +485,13 @@ func (s *Server) bootstrapLogToken() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		s.btoken = token
+		s.bootstrapToken = token
 		return token, nil
 	}
 	data, err := os.ReadFile(path)
 	if err == nil {
 		if token := strings.TrimSpace(string(data)); token != "" {
-			s.btoken = token
+			s.bootstrapToken = token
 			return token, nil
 		}
 	} else if !os.IsNotExist(err) {
@@ -510,6 +507,6 @@ func (s *Server) bootstrapLogToken() (string, error) {
 	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("write bootstrap log token: %w", err)
 	}
-	s.btoken = token
+	s.bootstrapToken = token
 	return token, nil
 }

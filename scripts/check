@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Static checks only: do not execute deployment or network-management scripts.
+set -Eeuo pipefail
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+scripts=()
+
+if ! command -v shellcheck >/dev/null 2>&1; then
+	printf '%s\n' 'shellcheck is required to check the shell scripts' >&2
+	exit 1
+fi
+
+for script in "$script_dir"/* "$script_dir"/e2e/*.sh; do
+	[ -f "$script" ] || continue
+	IFS= read -r shebang < "$script"
+	case "$shebang" in
+		'#!/bin/sh') sh -n "$script" ;;
+		'#!/usr/bin/env bash') bash -n "$script" ;;
+		*) continue ;;
+	esac
+	scripts+=("$script")
+done
+
+shellcheck "${scripts[@]}"
+printf 'Syntax and ShellCheck passed for %s scripts.\n' "${#scripts[@]}"

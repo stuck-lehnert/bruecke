@@ -48,7 +48,7 @@ func newDomainDeleteServer(t *testing.T) (*Server, *RootStore, *Store, Domain, *
 	}
 	wg := &recordingDomainReconfigure{}
 	app := NewServer(Config{AdminHash: string(hash)}, ServerDependencies{Clients: store, Roots: roots, WireGuard: wg})
-	app.sess["session"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
+	app.sessions["session"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
 	return app, roots, store, domain, wg
 }
 

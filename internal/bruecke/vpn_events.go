@@ -270,20 +270,7 @@ func (s *VPNEventStore) readClientFile(clientID string) (vpnEventFile, error) {
 }
 
 func (s *VPNEventStore) writeClientFile(clientID string, file vpnEventFile) error {
-	data, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode VPN events: %w", err)
-	}
-	data = append(data, '\n')
-	path := s.clientPath(clientID)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write VPN events: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("replace VPN events: %w", err)
-	}
-	return nil
+	return writeJSONFile(s.clientPath(clientID), "VPN events", file)
 }
 
 func (s *VPNEventStore) clientPath(clientID string) string {
@@ -404,15 +391,14 @@ func decodeVPNEventCursor(value string) (time.Time, string, error) {
 
 func (s *Server) handleVPNEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 	if !s.bootstrapLogUploadAuthorized(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if s.vevents == nil {
+	if s.vpnEvents == nil {
 		http.Error(w, "VPN event store is not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -423,7 +409,7 @@ func (s *Server) handleVPNEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
 		return
 	}
-	accepted, err := s.vevents.Append(req.Events, s.now())
+	accepted, err := s.vpnEvents.Append(req.Events, s.now())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -433,11 +419,10 @@ func (s *Server) handleVPNEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminVPNEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	if s.vevents == nil {
+	if s.vpnEvents == nil {
 		writeJSON(w, http.StatusOK, vpnEventListResponse{Events: []VPNEvent{}})
 		return
 	}
@@ -450,7 +435,7 @@ func (s *Server) handleAdminVPNEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
-	events, cursor, err := s.vevents.Events(VPNEventQuery{
+	events, cursor, err := s.vpnEvents.Events(VPNEventQuery{
 		ClientID: strings.TrimSpace(r.URL.Query().Get("client_id")),
 		Decision: strings.ToLower(strings.TrimSpace(r.URL.Query().Get("decision"))),
 		Outcome:  strings.ToLower(strings.TrimSpace(r.URL.Query().Get("outcome"))),

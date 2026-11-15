@@ -122,16 +122,32 @@ echo "Building image $image_name..."
 mkdir -p "$data_dir"
 
 echo "Generating WireGuard server key if missing..."
-server_pub=$("$runtime" run --rm \
+server_pub=$("$runtime" run --rm -i \
 	--entrypoint /bin/sh \
 	-v "$data_dir:/data" \
 	"$image_name" \
-	-lc 'set -eu; umask 077; if [ ! -s /data/wg-server.key ]; then wg genkey > /data/wg-server.key; fi; wg pubkey < /data/wg-server.key > /data/wg-server.pub; cat /data/wg-server.pub')
+	-s <<'SHELL'
+set -eu
+umask 077
+if [ ! -s /data/wg-server.key ]; then
+  wg genkey > /data/wg-server.key
+fi
+wg pubkey < /data/wg-server.key > /data/wg-server.pub
+cat /data/wg-server.pub
+SHELL
+)
 
 echo "Hashing admin password..."
+# The password goes over stdin; its expansion belongs to the container shell.
+# shellcheck disable=SC2016
 admin_hash=$("$runtime" run --rm -i \
 	alpine:3.20 \
-	sh -lc 'set -eu; apk add --no-cache apache2-utils >/dev/null; IFS= read -r password; htpasswd -bnBC 12 "" "$password" | tr -d ":\n"' <<<"$admin_password")
+	sh -lc '
+set -eu
+apk add --no-cache apache2-utils >/dev/null
+IFS= read -r password
+htpasswd -bnBC 12 "" "$password" | tr -d ":\n"
+' <<<"$admin_password")
 
 echo "Starting $container_name..."
 "$runtime" run -d \

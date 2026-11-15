@@ -76,7 +76,8 @@ cleanup() {
 			echo "e2e failed; server logs:" >&2
 			"$RUNTIME" logs "$SERVER" >&2 || true
 			echo "e2e failed; server network state:" >&2
-			"$RUNTIME" exec "$SERVER" sh -lc 'ip route; ip addr; iptables -S FORWARD; iptables -t nat -S POSTROUTING; for log in /data/remote-subnets-runtime/*/openvpn.log; do [ -f "$log" ] || continue; printf "==== %s ====\n" "$log"; tail -n 80 "$log"; done' >&2 || true
+			"$RUNTIME" exec -i "$SERVER" sh -s -- server-network-state \
+				< "$script_dir/e2e/services.sh" >&2 || true
 		fi
 		if "$RUNTIME" container inspect "$SERVICE" >/dev/null 2>&1; then
 			echo "e2e failed; service logs:" >&2
@@ -121,8 +122,14 @@ info() {
 	echo "[e2e] $*"
 }
 
-container_sh() {
-	"$RUNTIME" run --rm "$HELPER_IMAGE" sh -lc "$1"
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+
+client_script() {
+	"$RUNTIME" exec -i "$CLIENT" sh -s -- "$@" < "$script_dir/e2e/client.sh"
+}
+
+service_script() {
+	cat "$script_dir/e2e/services.sh"
 }
 
 info "runtime: $RUNTIME"
@@ -149,170 +156,24 @@ fi
 "$RUNTIME" volume create "$WORK_VOL" >/dev/null
 
 info "generating root/client certificates"
-"$RUNTIME" run --rm \
+"$RUNTIME" run --rm -i \
 	-v "$WORK_VOL:/work" \
 	-v "$DATA_VOL:/data" \
-	"$HELPER_IMAGE" sh -lc "
-set -eu
-cat > /work/client.cnf <<'CERTCONF'
-[req]
-prompt = no
-distinguished_name = dn
-req_extensions = v3_req
-
-[dn]
-CN = $HOSTNAME
-
-[v3_req]
-basicConstraints = CA:FALSE
-keyUsage = critical,digitalSignature
-extendedKeyUsage = clientAuth
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = $HOSTNAME
-CERTCONF
-openssl genrsa -out /work/root.key 2048 >/dev/null 2>&1
-openssl req -x509 -new -nodes -key /work/root.key -sha256 -days 2 \
-  -subj '/CN=bruecke-e2e-root' \
-  -addext 'basicConstraints=critical,CA:TRUE' \
-  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
-  -out /work/root.crt >/dev/null 2>&1
-openssl genrsa -out /work/client.key 2048 >/dev/null 2>&1
-openssl req -new -key /work/client.key -out /work/client.csr -config /work/client.cnf >/dev/null 2>&1
-openssl x509 -req -in /work/client.csr -CA /work/root.crt -CAkey /work/root.key -CAcreateserial \
-  -out /work/client.crt -days 2 -sha256 -extensions v3_req -extfile /work/client.cnf >/dev/null 2>&1
-cp /work/root.crt /data/domain-root-ca.pem
-cat > /work/ovpn-server.cnf <<'CERTCONF'
-[req]
-prompt = no
-distinguished_name = dn
-req_extensions = v3_req
-
-[dn]
-CN = remote-vpn
-
-[v3_req]
-basicConstraints = CA:FALSE
-keyUsage = critical,digitalSignature,keyEncipherment
-extendedKeyUsage = serverAuth
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = remote-vpn
-CERTCONF
-cat > /work/ovpn-client.cnf <<'CERTCONF'
-[req]
-prompt = no
-distinguished_name = dn
-req_extensions = v3_req
-
-[dn]
-CN = bruecke-remote-client
-
-[v3_req]
-basicConstraints = CA:FALSE
-keyUsage = critical,digitalSignature,keyEncipherment
-extendedKeyUsage = clientAuth
-CERTCONF
-openssl genrsa -out /work/ovpn-ca.key 2048 >/dev/null 2>&1
-openssl req -x509 -new -nodes -key /work/ovpn-ca.key -sha256 -days 2 \
-  -subj '/CN=bruecke-e2e-ovpn-ca' \
-  -addext 'basicConstraints=critical,CA:TRUE' \
-  -addext 'keyUsage=critical,keyCertSign,cRLSign' \
-  -out /work/ovpn-ca.crt >/dev/null 2>&1
-openssl genrsa -out /work/ovpn-server.key 2048 >/dev/null 2>&1
-openssl req -new -key /work/ovpn-server.key -out /work/ovpn-server.csr -config /work/ovpn-server.cnf >/dev/null 2>&1
-openssl x509 -req -in /work/ovpn-server.csr -CA /work/ovpn-ca.crt -CAkey /work/ovpn-ca.key -CAcreateserial \
-  -out /work/ovpn-server.crt -days 2 -sha256 -extensions v3_req -extfile /work/ovpn-server.cnf >/dev/null 2>&1
-openssl genrsa -out /work/ovpn-client.key 2048 >/dev/null 2>&1
-openssl req -new -key /work/ovpn-client.key -out /work/ovpn-client.csr -config /work/ovpn-client.cnf >/dev/null 2>&1
-openssl x509 -req -in /work/ovpn-client.csr -CA /work/ovpn-ca.crt -CAkey /work/ovpn-ca.key -CAcreateserial \
-  -out /work/ovpn-client.crt -days 2 -sha256 -extensions v3_req -extfile /work/ovpn-client.cnf >/dev/null 2>&1
-cat > /work/remote-free-server.conf <<'OVPNCONF'
-dev tun
-proto tcp-server
-port 1194
-topology subnet
-server 10.240.0.0 255.255.255.0
-duplicate-cn
-keepalive 1 5
-persist-key
-persist-tun
-ca /work/ovpn-ca.crt
-cert /work/ovpn-server.crt
-key /work/ovpn-server.key
-dh none
-verb 3
-OVPNCONF
-cat > /work/remote-restricted-server.conf <<'OVPNCONF'
-dev tun
-proto tcp-server
-port 1194
-topology subnet
-server 10.241.0.0 255.255.255.0
-duplicate-cn
-keepalive 1 5
-persist-key
-persist-tun
-ca /work/ovpn-ca.crt
-cert /work/ovpn-server.crt
-key /work/ovpn-server.key
-dh none
-verb 3
-OVPNCONF
-{
-  printf 'client\n'
-  printf 'dev tun\n'
-  printf 'proto tcp-client\n'
-  printf 'remote remote-free-vpn 1194\n'
-  printf 'nobind\n'
-  printf 'persist-key\n'
-  printf 'persist-tun\n'
-  printf 'remote-cert-tls server\n'
-  printf 'verify-x509-name remote-vpn name\n'
-  printf 'verb 3\n'
-  printf '<ca>\n'
-  cat /work/ovpn-ca.crt
-  printf '</ca>\n'
-  printf '<cert>\n'
-  cat /work/ovpn-client.crt
-  printf '</cert>\n'
-  printf '<key>\n'
-  cat /work/ovpn-client.key
-  printf '</key>\n'
-} > /work/remote-free-client.ovpn
-{
-  printf 'client\n'
-  printf 'dev tun\n'
-  printf 'proto tcp-client\n'
-  printf 'remote remote-restricted-vpn 1194\n'
-  printf 'nobind\n'
-  printf 'persist-key\n'
-  printf 'persist-tun\n'
-  printf 'remote-cert-tls server\n'
-  printf 'verify-x509-name remote-vpn name\n'
-  printf 'verb 3\n'
-  printf '<ca>\n'
-  cat /work/ovpn-ca.crt
-  printf '</ca>\n'
-  printf '<cert>\n'
-  cat /work/ovpn-client.crt
-  printf '</cert>\n'
-  printf '<key>\n'
-  cat /work/ovpn-client.key
-  printf '</key>\n'
-} > /work/remote-restricted-client.ovpn
-"
+	"$HELPER_IMAGE" sh -s -- "$HOSTNAME" < "$script_dir/e2e/prepare-certificates.sh"
 
 info "generating WireGuard server key"
-SERVER_PUB=$("$RUNTIME" run --rm -v "$DATA_VOL:/data" "$HELPER_IMAGE" sh -lc "
+SERVER_PUB=$("$RUNTIME" run --rm -i -v "$DATA_VOL:/data" "$HELPER_IMAGE" sh -s <<'SHELL'
 set -eu
 umask 077
 wg genkey > /data/wg-server.key
 wg pubkey < /data/wg-server.key
-")
-ADMIN_HASH=$(container_sh "htpasswd -bnBC 10 '' '$ADMIN_PASSWORD' | tr -d ':\n'")
+SHELL
+)
+ADMIN_HASH=$("$RUNTIME" run --rm -i "$HELPER_IMAGE" sh -s -- "$ADMIN_PASSWORD" <<'SHELL'
+set -eu
+htpasswd -bnBC 10 '' "$1" | tr -d ':\n'
+SHELL
+)
 
 info "starting remote OpenVPN site"
 "$RUNTIME" run -d \
@@ -320,28 +181,16 @@ info "starting remote OpenVPN site"
 	--cap-add NET_ADMIN \
 	--network "$REMOTE_FREE_NETWORK" \
 	--ip "$REMOTE_FREE_IP" \
-	"$HELPER_IMAGE" sh -lc "
-set -eu
-iptables -A INPUT -p tcp --dport 18082 -s 10.222.0.2 -j ACCEPT
-iptables -A INPUT -p tcp --dport 18082 -j DROP
-while true; do
-  printf 'HTTP/1.1 200 OK\r\nContent-Length: 23\r\n\r\nbruecke-remote-free-ok\n' | nc -l -s $REMOTE_FREE_IP -p 18082
-done
-" >/dev/null
+	"$HELPER_IMAGE" sh -lc "$(service_script)" e2e-services \
+	serve-http "$REMOTE_FREE_IP" 18082 bruecke-remote-free-ok 10.222.0.2 >/dev/null
 
 "$RUNTIME" run -d \
 	--name "$REMOTE_RESTRICTED_SERVICE" \
 	--cap-add NET_ADMIN \
 	--network "$REMOTE_RESTRICTED_NETWORK" \
 	--ip "$REMOTE_RESTRICTED_IP" \
-	"$HELPER_IMAGE" sh -lc "
-set -eu
-iptables -A INPUT -p tcp --dport 18083 -s 10.223.0.2 -j ACCEPT
-iptables -A INPUT -p tcp --dport 18083 -j DROP
-while true; do
-  printf 'HTTP/1.1 200 OK\r\nContent-Length: 29\r\n\r\nbruecke-remote-restricted-ok\n' | nc -l -s $REMOTE_RESTRICTED_IP -p 18083
-done
-" >/dev/null
+	"$HELPER_IMAGE" sh -lc "$(service_script)" e2e-services \
+	serve-http "$REMOTE_RESTRICTED_IP" 18083 bruecke-remote-restricted-ok 10.223.0.2 >/dev/null
 
 "$RUNTIME" run -d \
 	--name "$REMOTE_FREE_VPN" \
@@ -349,17 +198,10 @@ done
 	--network-alias remote-free-vpn \
 	--privileged \
 	-v "$WORK_VOL:/work" \
-	"$HELPER_IMAGE" sh -lc "
-set -eu
-while [ ! -f /work/remote-free-vpn-start ]; do sleep 0.2; done
-sysctl -w net.ipv4.ip_forward=1 >/dev/null || true
-iptables -A FORWARD -s $REMOTE_FREE_VPN_CIDR -d $REMOTE_FREE_CIDR -j ACCEPT
-iptables -A FORWARD -s $REMOTE_FREE_CIDR -d $REMOTE_FREE_VPN_CIDR -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-iptables -t nat -A POSTROUTING -s $REMOTE_FREE_VPN_CIDR -d $REMOTE_FREE_CIDR -j MASQUERADE
-exec openvpn --config /work/remote-free-server.conf
-" >/dev/null
+	"$HELPER_IMAGE" sh -lc "$(service_script)" e2e-services \
+	openvpn remote-free "$REMOTE_FREE_VPN_CIDR" "$REMOTE_FREE_CIDR" >/dev/null
 "$RUNTIME" network connect --ip 10.222.0.2 "$REMOTE_FREE_NETWORK" "$REMOTE_FREE_VPN"
-"$RUNTIME" run --rm -v "$WORK_VOL:/work" "$HELPER_IMAGE" sh -lc "touch /work/remote-free-vpn-start"
+"$RUNTIME" run --rm -v "$WORK_VOL:/work" "$HELPER_IMAGE" touch /work/remote-free-vpn-start
 
 "$RUNTIME" run -d \
 	--name "$REMOTE_RESTRICTED_VPN" \
@@ -367,17 +209,10 @@ exec openvpn --config /work/remote-free-server.conf
 	--network-alias remote-restricted-vpn \
 	--privileged \
 	-v "$WORK_VOL:/work" \
-	"$HELPER_IMAGE" sh -lc "
-set -eu
-while [ ! -f /work/remote-restricted-vpn-start ]; do sleep 0.2; done
-sysctl -w net.ipv4.ip_forward=1 >/dev/null || true
-iptables -A FORWARD -s $REMOTE_RESTRICTED_VPN_CIDR -d $REMOTE_RESTRICTED_CIDR -j ACCEPT
-iptables -A FORWARD -s $REMOTE_RESTRICTED_CIDR -d $REMOTE_RESTRICTED_VPN_CIDR -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-iptables -t nat -A POSTROUTING -s $REMOTE_RESTRICTED_VPN_CIDR -d $REMOTE_RESTRICTED_CIDR -j MASQUERADE
-exec openvpn --config /work/remote-restricted-server.conf
-" >/dev/null
+	"$HELPER_IMAGE" sh -lc "$(service_script)" e2e-services \
+	openvpn remote-restricted "$REMOTE_RESTRICTED_VPN_CIDR" "$REMOTE_RESTRICTED_CIDR" >/dev/null
 "$RUNTIME" network connect --ip 10.223.0.2 "$REMOTE_RESTRICTED_NETWORK" "$REMOTE_RESTRICTED_VPN"
-"$RUNTIME" run --rm -v "$WORK_VOL:/work" "$HELPER_IMAGE" sh -lc "touch /work/remote-restricted-vpn-start"
+"$RUNTIME" run --rm -v "$WORK_VOL:/work" "$HELPER_IMAGE" touch /work/remote-restricted-vpn-start
 
 info "starting bruecke server"
 "$RUNTIME" run -d \
@@ -401,44 +236,22 @@ info "starting bruecke server"
 "$RUNTIME" network connect --alias server "$NETWORK" "$SERVER"
 
 info "waiting for server health"
-"$RUNTIME" run --rm --network "$NETWORK" "$HELPER_IMAGE" sh -lc "
-set -eu
-for i in \$(seq 1 60); do
-  curl -fsS http://server:8080/healthz >/dev/null && exit 0
-  sleep 1
-done
-echo 'server did not become healthy' >&2
-exit 1
-"
+"$RUNTIME" run --rm -i --network "$NETWORK" "$HELPER_IMAGE" sh -s -- wait-healthy \
+	< "$script_dir/e2e/services.sh"
 
 info "starting VPN-only dummy service"
 "$RUNTIME" run -d \
 	--name "$SERVICE" \
 	--network "container:$SERVER" \
-	"$HELPER_IMAGE" sh -lc "
-set -eu
-while true; do
-  printf 'HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nbruecke-e2e-ok\n' | nc -l -s $WG_SERVER_IP -p 18080
-done
-" >/dev/null
+	"$HELPER_IMAGE" sh -lc "$(service_script)" e2e-services \
+	serve-http "$WG_SERVER_IP" 18080 bruecke-e2e-ok >/dev/null
 
 info "starting internet egress service"
 "$RUNTIME" run -d \
 	--name "$INTERNET_SERVICE" \
 	--network "$INTERNET_NETWORK" \
-	-e IPV6_EGRESS="$IPV6_EGRESS" \
-	"$HELPER_IMAGE" sh -lc "
-set -eu
-while true; do
-  printf 'HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\nbruecke-internet-e2e-ok\n' | nc -l -p $INTERNET_SERVICE_PORT
-done &
-if [ \"\${IPV6_EGRESS:-0}\" = 1 ]; then
-  while true; do
-    printf 'HTTP/1.1 200 OK\r\nContent-Length: 24\r\n\r\nbruecke-internet-e2e-ok\n' | nc -l -s :: -p $INTERNET_SERVICE_PORT
-  done &
-fi
-wait
-" >/dev/null
+	"$HELPER_IMAGE" sh -lc "$(service_script)" e2e-services \
+	serve-internet "$INTERNET_SERVICE_PORT" "$IPV6_EGRESS" >/dev/null
 INTERNET_SERVICE_IP=$("$RUNTIME" inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$INTERNET_SERVICE")
 INTERNET_SERVICE_IPV6=""
 if [ "$IPV6_EGRESS" = "1" ]; then
@@ -458,311 +271,65 @@ info "starting client container"
 	"$HELPER_IMAGE" sleep infinity >/dev/null
 
 info "enrolling client and configuring WireGuard"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-jq -Rs '{certificate:.}' /work/client.crt > /work/enroll-start.json
-curl -fsS -X POST http://server:8080/enroll/start \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/enroll-start.json > /work/enroll-start-response.json
-jq -r .challenge /work/enroll-start-response.json | base64 -d > /work/challenge.bin
-openssl dgst -sha256 -sign /work/client.key -out /work/challenge.sig /work/challenge.bin
-handshake_id=\$(jq -r .handshake_id /work/enroll-start-response.json)
-signature=\$(base64 /work/challenge.sig | tr -d '\n')
-jq -n --arg id "\$handshake_id" --arg sig "\$signature" --arg alg sha256-rsa \
-  '{handshake_id:\$id, algorithm:\$alg, signature:\$sig}' > /work/enroll-finish.json
-curl -fsS -X POST http://server:8080/enroll/finish \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/enroll-finish.json > /work/client.conf
-awk -F ' = ' '/PrivateKey/ {print \$2; exit}' /work/client.conf > /work/client-wg.key
-addr_line=\$(awk -F ' = ' '/Address/ {print \$2; exit}' /work/client.conf)
-client_v4=\$(printf '%s' "\$addr_line" | cut -d, -f1 | tr -d ' ')
-client_v6=\$(printf '%s' "\$addr_line" | cut -s -d, -f2 | tr -d ' ')
-server_pub=\$(awk -F ' = ' '/PublicKey/ {print \$2; exit}' /work/client.conf)
-peer_allowed=\$(awk -F ' = ' '/AllowedIPs/ {print \$2; exit}' /work/client.conf | tr -d ' ')
-ip link add dev wg0 type wireguard
-wg set wg0 private-key /work/client-wg.key peer "\$server_pub" endpoint server:51820 allowed-ips "\$peer_allowed" persistent-keepalive 1
-ip address add "\$client_v4" dev wg0
-if [ -n "\$client_v6" ]; then
-  ip -6 address add "\$client_v6" dev wg0
-fi
-ip link set up dev wg0
-ip route replace $WG_CIDR dev wg0
-ip route replace default dev wg0
-if [ "$IPV6_EGRESS" = "1" ] && [ -n "$INTERNET_SERVICE_IPV6" ]; then
-  ip -6 route replace $WG_IPV6_CIDR dev wg0
-  ip -6 route replace default dev wg0
-fi
-"
+client_script enroll "$WG_CIDR" "$WG_IPV6_CIDR" "$IPV6_EGRESS" "$INTERNET_SERVICE_IPV6"
 
 info "verifying VPN-only service is reachable"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 30); do
-  curl -fsS --max-time 2 $WG_SERVICE_URL 2>/dev/null | grep -q bruecke-e2e-ok && exit 0
-  sleep 1
-done
-echo 'VPN service was not reachable' >&2
-exit 1
-"
+client_script wait-reachable "$WG_SERVICE_URL" bruecke-e2e-ok 30 "VPN service was not reachable"
 
 info "verifying VPN internet egress is reachable"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 30); do
-  curl -fsS --max-time 2 http://$INTERNET_SERVICE_IP:$INTERNET_SERVICE_PORT/ 2>/dev/null | grep -q bruecke-internet-e2e-ok && exit 0
-  sleep 1
-done
-echo 'VPN internet egress was not reachable' >&2
-exit 1
-"
+client_script wait-reachable "http://$INTERNET_SERVICE_IP:$INTERNET_SERVICE_PORT/" \
+	bruecke-internet-e2e-ok 30 "VPN internet egress was not reachable"
 
 if [ "$IPV6_EGRESS" = "1" ]; then
 	info "verifying VPN IPv6 internet egress is reachable"
-	"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 30); do
-  curl -g -6 -fsS --max-time 2 http://[$INTERNET_SERVICE_IPV6]:$INTERNET_SERVICE_PORT/ 2>/dev/null | grep -q bruecke-internet-e2e-ok && exit 0
-  sleep 1
-done
-echo 'VPN IPv6 internet egress was not reachable' >&2
-exit 1
-"
+	client_script wait-reachable "http://[$INTERNET_SERVICE_IPV6]:$INTERNET_SERVICE_PORT/" \
+		bruecke-internet-e2e-ok 30 "VPN IPv6 internet egress was not reachable"
 fi
 
 info "configuring remote subnets through admin API"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-jq -n --arg password \"$ADMIN_PASSWORD\" '{password:\$password}' > /work/admin-login.json
-printf '%s' '{\"enabled\":false}' > /work/client-disable.json
-jq -Rs --arg name remote-free --arg cidr \"$REMOTE_FREE_CIDR\" '{name:\$name, config_type:\"ovpn\", source_filename:\"remote-free-client.ovpn\", config:., subnets:[\$cidr], group_ids:[\"all\"]}' /work/remote-free-client.ovpn > /work/remote-free.json
-jq -Rs --arg name remote-restricted --arg cidr \"$REMOTE_RESTRICTED_CIDR\" '{name:\$name, config_type:\"ovpn\", source_filename:\"remote-restricted-client.ovpn\", config:., subnets:[\$cidr], group_ids:[]}' /work/remote-restricted-client.ovpn > /work/remote-restricted.json
-curl -fsS -c /work/admin-cookie.txt -X POST http://server:8080/api/admin/login \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/admin-login.json >/dev/null
-curl -fsS -b /work/admin-cookie.txt http://server:8080/api/admin/clients > /work/clients.json
-jq -e --arg hostname \"$HOSTNAME\" '.clients[] | select(.hostname == \$hostname and (.id | length > 0) and (.domain_id | length > 0) and (.group_ids | index(\"all\")) and any(.group_ids[]; startswith(\"domain:\")))' /work/clients.json >/dev/null
-jq -r --arg hostname \"$HOSTNAME\" '.clients[] | select(.hostname == \$hostname) | .id' /work/clients.json > /work/client-id
-jq -r --arg hostname \"$HOSTNAME\" '.clients[] | select(.hostname == \$hostname) | .domain_id' /work/clients.json > /work/domain-id
-domain_id=\$(cat /work/domain-id)
-domain_path=\$(jq -rn --arg id \"\$domain_id\" '\$id|@uri')
-curl -fsS -b /work/admin-cookie.txt http://server:8080/api/admin/groups > /work/groups.json
-jq -e --arg domain \"\$domain_id\" '(.groups | any(.id == \"all\" and .built_in == true)) and (.groups | any(.id == (\"domain:\" + \$domain) and .type == \"domain\" and .built_in == true))' /work/groups.json >/dev/null
-printf '%s' '{\"dns_servers\":[\"1.1.1.1\"]}' > /work/domain-dns-one.json
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/domains/\$domain_path \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/domain-dns-one.json > /work/domain-dns-one-response.json
-jq -e --arg domain \"\$domain_id\" '.id == \$domain and .dns_servers == [\"1.1.1.1\"]' /work/domain-dns-one-response.json >/dev/null
-curl -fsS -b /work/admin-cookie.txt -X POST http://server:8080/api/admin/remote-subnets \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/remote-free.json > /work/remote-free-response.json
-jq -e --arg cidr \"$REMOTE_FREE_CIDR\" '.name == \"remote-free\" and (.group_ids | index(\"all\")) and (.subnets | index(\$cidr))' /work/remote-free-response.json >/dev/null
-jq -r .id /work/remote-free-response.json > /work/remote-free-id
-curl -fsS -b /work/admin-cookie.txt -X POST http://server:8080/api/admin/remote-subnets \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/remote-restricted.json > /work/remote-restricted-response.json
-jq -e --arg cidr \"$REMOTE_RESTRICTED_CIDR\" '.name == \"remote-restricted\" and ((.group_ids // []) | length == 0) and (.subnets | index(\$cidr))' /work/remote-restricted-response.json >/dev/null
-jq -r .id /work/remote-restricted-response.json > /work/remote-restricted-id
-jq -n --arg hostname \"$MANUAL_HOSTNAME\" --arg domain \"\$domain_id\" '{hostname:\$hostname, domain_id:\$domain}' > /work/manual-enroll.json
-curl -fsS -b /work/admin-cookie.txt -X POST http://server:8080/api/admin/manual-enroll \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/manual-enroll.json > /work/manual-enroll-response.json
-jq -e --arg hostname \"$MANUAL_HOSTNAME\" --arg free \"$REMOTE_FREE_CIDR\" --arg restricted \"$REMOTE_RESTRICTED_CIDR\" '.hostname == \$hostname and (.config | contains(\"[Interface]\")) and (.config | contains(\"PrivateKey = \")) and (.config | contains(\"DNS = 1.1.1.1\")) and ((.config | contains(\$free)) | not) and ((.config | contains(\$restricted)) | not)' /work/manual-enroll-response.json >/dev/null
-printf '%s' '{\"dns_servers\":[\"8.8.8.8\"]}' > /work/domain-dns-two.json
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/domains/\$domain_path \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/domain-dns-two.json > /work/domain-dns-two-response.json
-jq -e --arg domain \"\$domain_id\" '.id == \$domain and .dns_servers == [\"8.8.8.8\"]' /work/domain-dns-two-response.json >/dev/null
-jq -n --arg hostname \"$MANUAL_SECOND_HOSTNAME\" --arg domain \"\$domain_id\" '{hostname:\$hostname, domain_id:\$domain}' > /work/manual-second-enroll.json
-curl -fsS -b /work/admin-cookie.txt -X POST http://server:8080/api/admin/manual-enroll \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/manual-second-enroll.json > /work/manual-second-enroll-response.json
-jq -e --arg hostname \"$MANUAL_SECOND_HOSTNAME\" '.hostname == \$hostname and (.config | contains(\"DNS = 8.8.8.8\"))' /work/manual-second-enroll-response.json >/dev/null
-"
+client_script configure-remote-subnets "$ADMIN_PASSWORD" "$HOSTNAME" "$MANUAL_HOSTNAME" \
+	"$MANUAL_SECOND_HOSTNAME" "$REMOTE_FREE_CIDR" "$REMOTE_RESTRICTED_CIDR"
 
 info "verifying free remote subnet is reachable"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 60); do
-  curl -fsS --max-time 2 $REMOTE_FREE_URL 2>/dev/null | grep -q bruecke-remote-free-ok && exit 0
-  sleep 1
-done
-echo 'free remote subnet was not reachable' >&2
-exit 1
-"
+client_script wait-reachable "$REMOTE_FREE_URL" bruecke-remote-free-ok 60 "free remote subnet was not reachable"
 
 info "deactivating free remote subnet"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-free_id=\$(cat /work/remote-free-id)
-printf '%s' '{\"enabled\":false}' > /work/remote-free-disable.json
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/remote-subnets/\$free_id \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/remote-free-disable.json > /work/remote-free-disable-response.json
-jq -e '.enabled == false' /work/remote-free-disable-response.json >/dev/null
-"
+client_script set-remote-enabled false
 
 info "verifying deactivated remote subnet is denied"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 10); do
-  if ! curl -fsS --max-time 2 $REMOTE_FREE_URL >/dev/null 2>&1; then
-    exit 0
-  fi
-  sleep 1
-done
-echo 'free remote subnet was reachable after deactivation' >&2
-exit 1
-"
+client_script wait-denied "$REMOTE_FREE_URL" 10 "free remote subnet was reachable after deactivation"
 
 info "reactivating free remote subnet"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-free_id=\$(cat /work/remote-free-id)
-printf '%s' '{\"enabled\":true}' > /work/remote-free-enable.json
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/remote-subnets/\$free_id \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/remote-free-enable.json > /work/remote-free-enable-response.json
-jq -e '.enabled == true' /work/remote-free-enable-response.json >/dev/null
-"
+client_script set-remote-enabled true
 
 info "verifying reactivated remote subnet is reachable"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 60); do
-  curl -fsS --max-time 2 $REMOTE_FREE_URL 2>/dev/null | grep -q bruecke-remote-free-ok && exit 0
-  sleep 1
-done
-echo 'free remote subnet was not reachable after reactivation' >&2
-exit 1
-"
+client_script wait-reachable "$REMOTE_FREE_URL" bruecke-remote-free-ok 60 "free remote subnet was not reachable after reactivation"
 
 info "verifying restricted remote subnet is denied before grant"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 10); do
-  if ! curl -fsS --max-time 2 $REMOTE_RESTRICTED_URL >/dev/null 2>&1; then
-    exit 0
-  fi
-  sleep 1
-done
-echo 'restricted remote subnet was reachable before grant' >&2
-exit 1
-"
+client_script wait-denied "$REMOTE_RESTRICTED_URL" 10 "restricted remote subnet was reachable before grant"
 
 info "granting restricted remote subnet to nested group"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-restricted_id=\$(cat /work/remote-restricted-id)
-client_id=\$(cat /work/client-id)
-printf '%s' '{\"name\":\"e2e-child\"}' > /work/group-child-create.json
-curl -fsS -b /work/admin-cookie.txt -X POST http://server:8080/api/admin/groups \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/group-child-create.json > /work/group-child-response.json
-child_id=\$(jq -r .id /work/group-child-response.json)
-jq -n --arg client \"\$client_id\" '{client_ids:[\$client]}' > /work/group-child-update.json
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/groups/\$child_id \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/group-child-update.json >/dev/null
-printf '%s' '{\"name\":\"e2e-parent\"}' > /work/group-parent-create.json
-curl -fsS -b /work/admin-cookie.txt -X POST http://server:8080/api/admin/groups \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/group-parent-create.json > /work/group-parent-response.json
-parent_id=\$(jq -r .id /work/group-parent-response.json)
-jq -n --arg child \"\$child_id\" '{group_ids:[\$child]}' > /work/group-parent-update.json
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/groups/\$parent_id \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/group-parent-update.json >/dev/null
-jq -n --arg parent \"\$parent_id\" '{group_ids:[\$parent]}' > /work/group-child-recursive.json
-status=\$(curl -sS -o /work/group-child-recursive-response.txt -w '%{http_code}' -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/groups/\$child_id \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/group-child-recursive.json)
-if [ \"\$status\" != \"400\" ]; then
-  echo \"recursive group update returned \$status\" >&2
-  exit 1
-fi
-jq -n --arg parent \"\$parent_id\" '{group_ids:[\$parent]}' > /work/remote-restricted-grant.json
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/remote-subnets/\$restricted_id \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/remote-restricted-grant.json > /work/remote-restricted-grant-response.json
-jq -e --arg parent \"\$parent_id\" '(.group_ids | index(\$parent))' /work/remote-restricted-grant-response.json >/dev/null
-"
+client_script grant-nested-group
 
 info "verifying restricted remote subnet is reachable after grant"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 30); do
-  curl -fsS --max-time 2 $REMOTE_RESTRICTED_URL 2>/dev/null | grep -q bruecke-remote-restricted-ok && exit 0
-  sleep 1
-done
-echo 'restricted remote subnet was not reachable after grant' >&2
-exit 1
-"
+client_script wait-reachable "$REMOTE_RESTRICTED_URL" bruecke-remote-restricted-ok 30 "restricted remote subnet was not reachable after grant"
 
 info "revoking restricted remote subnet from group"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-restricted_id=\$(cat /work/remote-restricted-id)
-printf '%s' '{\"group_ids\":[]}' > /work/remote-restricted-revoke.json
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/remote-subnets/\$restricted_id \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/remote-restricted-revoke.json >/dev/null
-"
+client_script revoke-remote-subnet
 
 info "verifying restricted remote subnet is denied after revoke"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-sleep 1
-for i in \$(seq 1 10); do
-  if ! curl -fsS --max-time 2 $REMOTE_RESTRICTED_URL >/dev/null 2>&1; then
-    exit 0
-  fi
-  sleep 1
-done
-echo 'restricted remote subnet was reachable after revoke' >&2
-exit 1
-"
+client_script wait-denied "$REMOTE_RESTRICTED_URL" 10 "restricted remote subnet was reachable after revoke" 1
 
 info "disabling client through admin API"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-client_path=\$(jq -rn --arg id \"\$(cat /work/client-id)\" '\$id|@uri')
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/clients/\$client_path \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/client-disable.json >/dev/null
-"
+client_script set-client-enabled false
 
 info "verifying disabled client cannot reach service"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 10); do
-  if ! curl -fsS --max-time 2 $WG_SERVICE_URL >/dev/null 2>&1; then
-    exit 0
-  fi
-  sleep 1
-done
-echo 'VPN service was still reachable after disable' >&2
-exit 1
-"
+client_script wait-denied "$WG_SERVICE_URL" 10 "VPN service was still reachable after disable"
 
 info "re-enabling client"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-printf '%s' '{\"enabled\":true}' > /work/client-enable.json
-client_path=\$(jq -rn --arg id \"\$(cat /work/client-id)\" '\$id|@uri')
-curl -fsS -b /work/admin-cookie.txt -X PATCH http://server:8080/api/admin/clients/\$client_path \
-  -H 'Content-Type: application/json' \
-  --data-binary @/work/client-enable.json >/dev/null
-"
+client_script set-client-enabled true
 
 info "verifying service is reachable again"
-"$RUNTIME" exec "$CLIENT" sh -lc "
-set -eu
-for i in \$(seq 1 30); do
-  curl -fsS --max-time 2 $WG_SERVICE_URL 2>/dev/null | grep -q bruecke-e2e-ok && exit 0
-  sleep 1
-done
-echo 'VPN service was not reachable after re-enable' >&2
-exit 1
-"
+client_script wait-reachable "$WG_SERVICE_URL" bruecke-e2e-ok 30 "VPN service was not reachable after re-enable"
 
 info "success"

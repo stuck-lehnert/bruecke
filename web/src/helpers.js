@@ -7,7 +7,10 @@ export function mergeRemoteSubnets(current, subnet) {
 }
 
 export function splitSubnetText(value) {
-  return value.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean)
+  return value
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
 }
 
 export function upsertClient(current, client) {
@@ -33,7 +36,11 @@ export function clientLabel(client) {
 // Validate the OpenSSH envelope locally; the server remains authoritative for
 // cryptographic validation and duplicate keys/hostnames.
 export function isSupportedSshPublicKey(value) {
-  const match = value.trim().match(/^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(?:256|384|521))[ \t]+([A-Za-z0-9+/]+={0,2})(?:[ \t]+[^\r\n]*)?$/)
+  const match = value
+    .trim()
+    .match(
+      /^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(?:256|384|521))[ \t]+([A-Za-z0-9+/]+={0,2})(?:[ \t]+[^\r\n]*)?$/,
+    )
   if (!match || value.length > 16384) return false
   try {
     const bytes = Uint8Array.from(atob(match[2]), (character) => character.charCodeAt(0))
@@ -56,13 +63,17 @@ export function isSupportedSshPublicKey(value) {
       const exponent = read()
       const modulus = read()
       const first = modulus.findIndex((byte) => byte !== 0)
-      const bits = first < 0 ? 0 : (modulus.length - first - 1) * 8 + Math.floor(Math.log2(modulus[first])) + 1
+      const bits =
+        first < 0 ? 0 : (modulus.length - first - 1) * 8 + Math.floor(Math.log2(modulus[first])) + 1
       valid = exponent.some((byte) => byte !== 0) && bits >= 2048 && bits <= 8192
     } else {
       const curve = match[1].slice('ecdsa-sha2-'.length)
       const curveMatches = text(read()) === curve
       const point = read()
-      valid = curveMatches && point[0] === 4 && point.length === { nistp256: 65, nistp384: 97, nistp521: 133 }[curve]
+      valid =
+        curveMatches &&
+        point[0] === 4 &&
+        point.length === { nistp256: 65, nistp384: 97, nistp521: 133 }[curve]
     }
     return valid && offset === bytes.length
   } catch {
@@ -86,7 +97,30 @@ export function clientRemoteSubnets(client, subnets) {
 
 export function remoteAccessSummary(subnet, groups, clients) {
   const groupNames = (subnet.group_ids || []).map((id) => groupLabel(groups, id))
-  const clientNames = (subnet.client_ids || []).map((id) => clientLabel(clients.find((client) => client.id === id)))
+  const clientNames = (subnet.client_ids || []).map((id) =>
+    clientLabel(clients.find((client) => client.id === id)),
+  )
   const parts = [...groupNames, ...clientNames]
   return parts.length ? parts.join(', ') : 'none'
+}
+
+export function filterClients(clients, query, status) {
+  const normalizedPeerQuery = query.trim().toLowerCase()
+  return clients.filter((client) => {
+    if (status === 'connected' && (!client.enabled || !client.connected)) return false
+    if (status === 'offline' && (!client.enabled || client.connected)) return false
+    if (status === 'disabled' && client.enabled) return false
+    if (!normalizedPeerQuery) return true
+    return [
+      client.hostname,
+      client.domain_name,
+      client.ip,
+      client.ipv6,
+      client.type || 'wireguard',
+    ].some((value) =>
+      String(value || '')
+        .toLowerCase()
+        .includes(normalizedPeerQuery),
+    )
+  })
 }

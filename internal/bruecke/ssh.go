@@ -47,14 +47,29 @@ func NewSSHServer(cfg Config, clients ClientRepository, roots RootRepository, re
 }
 
 func newSSHServer(signer ssh.Signer, clients ClientRepository, roots RootRepository, remote RemoteSubnetRepository, logger Logger, addresses sshAddressManager) *SSHServer {
-	s := &SSHServer{clients: clients, roots: roots, remote: remote, logger: logger, addresses: addresses,
-		dial: dialSSHForward, raw: map[net.Conn]struct{}{}, active: map[string]map[*ssh.ServerConn]struct{}{}, leases: map[string]Client{}, last: map[string]time.Time{}}
+	s := &SSHServer{
+		clients:   clients,
+		roots:     roots,
+		remote:    remote,
+		logger:    logger,
+		addresses: addresses,
+		dial:      dialSSHForward,
+		raw:       map[net.Conn]struct{}{},
+		active:    map[string]map[*ssh.ServerConn]struct{}{},
+		leases:    map[string]Client{},
+		last:      map[string]time.Time{},
+	}
 	algorithms := ssh.SupportedAlgorithms()
 	s.config = &ssh.ServerConfig{
-		Config:                  ssh.Config{KeyExchanges: algorithms.KeyExchanges, Ciphers: algorithms.Ciphers, MACs: algorithms.MACs},
+		Config: ssh.Config{
+			KeyExchanges: algorithms.KeyExchanges,
+			Ciphers:      algorithms.Ciphers,
+			MACs:         algorithms.MACs,
+		},
 		PublicKeyAuthAlgorithms: algorithms.PublicKeyAuths,
-		MaxAuthTries:            3, ServerVersion: "SSH-2.0-bruecke",
-		PublicKeyCallback: s.authenticate,
+		MaxAuthTries:            3,
+		ServerVersion:           "SSH-2.0-bruecke",
+		PublicKeyCallback:       s.authenticate,
 	}
 	s.config.AddHostKey(signer)
 	if logger != nil {
@@ -103,7 +118,12 @@ func (s *SSHServer) Serve(listener net.Listener) error {
 		s.mu.Unlock()
 		go func() {
 			defer s.wg.Done()
-			defer func() { _ = raw.Close(); s.mu.Lock(); delete(s.raw, raw); s.mu.Unlock() }()
+			defer func() {
+				_ = raw.Close()
+				s.mu.Lock()
+				delete(s.raw, raw)
+				s.mu.Unlock()
+			}()
 			s.handle(raw)
 		}()
 	}
@@ -215,7 +235,11 @@ func (s *SSHServer) handle(raw net.Conn) {
 	}()
 	go s.monitor(ctx, conn, client)
 	var forwards sync.WaitGroup
-	defer func() { cancel(); _ = conn.Close(); forwards.Wait() }()
+	defer func() {
+		cancel()
+		_ = conn.Close()
+		forwards.Wait()
+	}()
 	slots := make(chan struct{}, 32)
 	for channel := range channels {
 		if channel.ChannelType() != "direct-tcpip" {
@@ -250,7 +274,10 @@ func (s *SSHServer) monitor(ctx context.Context, conn *ssh.ServerConn, client Cl
 				return
 			}
 			done := make(chan struct{})
-			go func() { _, _, _ = conn.SendRequest("keepalive@openssh.com", true, nil); close(done) }()
+			go func() {
+				_, _, _ = conn.SendRequest("keepalive@openssh.com", true, nil)
+				close(done)
+			}()
 			timer := time.NewTimer(10 * time.Second)
 			select {
 			case <-done:

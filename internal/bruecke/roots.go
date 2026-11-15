@@ -42,25 +42,6 @@ type Domain struct {
 	UpdatedAt         time.Time            `json:"updated_at"`
 }
 
-type DomainLocalNetwork struct {
-	Type         string `json:"type"`
-	Name         string `json:"name,omitempty"`
-	SSID         string `json:"ssid,omitempty"`
-	Gateway      string `json:"gateway,omitempty"`
-	Subnet       string `json:"subnet,omitempty"`
-	SearchDomain string `json:"search_domain,omitempty"`
-}
-
-type legacyDomainLocalNetwork struct {
-	WifiName         string `json:"wifi_name,omitempty"`
-	WifiGateway      string `json:"wifi_gateway,omitempty"`
-	WifiSubnet       string `json:"wifi_subnet,omitempty"`
-	WifiSearchDomain string `json:"wifi_search_domain,omitempty"`
-	EthGateway       string `json:"eth_gateway,omitempty"`
-	EthSubnet        string `json:"eth_subnet,omitempty"`
-	EthSearchDomain  string `json:"eth_search_domain,omitempty"`
-}
-
 type DomainPatch struct {
 	Name              *string
 	DNSServers        *[]string
@@ -461,19 +442,7 @@ func (s *RootStore) migrateLocked(now time.Time) error {
 }
 
 func (s *RootStore) saveLocked() error {
-	data, err := json.MarshalIndent(s.state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode root store: %w", err)
-	}
-	data = append(data, '\n')
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write root store: %w", err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return fmt.Errorf("replace root store: %w", err)
-	}
-	return nil
+	return writeJSONFile(s.path, "root store", s.state)
 }
 
 func certificateID(cert *x509.Certificate) string {
@@ -502,153 +471,21 @@ func copyDomain(domain Domain) Domain {
 }
 
 func (d Domain) VPNSettings() VPNSettings {
-	return VPNSettings{WGCIDR: d.WGCIDR, WGServerIP: d.WGServerIP, WGIPv6CIDR: d.WGIPv6CIDR, WGIPv6ServerIP: d.WGIPv6ServerIP, DNSServers: append([]string(nil), d.DNSServers...), SearchDomain: d.SearchDomain}
+	return VPNSettings{
+		WGCIDR:         d.WGCIDR,
+		WGServerIP:     d.WGServerIP,
+		WGIPv6CIDR:     d.WGIPv6CIDR,
+		WGIPv6ServerIP: d.WGIPv6ServerIP,
+		DNSServers:     append([]string(nil), d.DNSServers...),
+		SearchDomain:   d.SearchDomain,
+	}
 }
 
 func normalizeDomainDNS(dns []string, searchDomain string, domain Domain) (VPNSettings, error) {
-	return normalizeVPNSettings(VPNSettings{WGCIDR: domain.WGCIDR, WGServerIP: domain.WGServerIP, WGIPv6CIDR: domain.WGIPv6CIDR, WGIPv6ServerIP: domain.WGIPv6ServerIP, DNSServers: dns, SearchDomain: searchDomain})
-}
-
-func normalizeDomainLocalNetworks(networks []DomainLocalNetwork) ([]DomainLocalNetwork, error) {
-	if len(networks) == 0 {
-		return nil, nil
-	}
-	normalized := make([]DomainLocalNetwork, 0, len(networks))
-	for index, network := range networks {
-		label := fmt.Sprintf("local network %d", index+1)
-		network.Type = strings.ToLower(strings.TrimSpace(network.Type))
-		network.Name = strings.TrimSpace(network.Name)
-		network.SSID = strings.TrimSpace(network.SSID)
-		if network.Name != "" {
-			label += " (" + network.Name + ")"
-		}
-		if network.Type != "wifi" && network.Type != "ethernet" {
-			return nil, fmt.Errorf("%s type must be wifi or ethernet", label)
-		}
-		if network.Type == "ethernet" && network.SSID != "" {
-			return nil, fmt.Errorf("%s cannot configure an SSID for ethernet", label)
-		}
-		var err error
-		network.Gateway, err = normalizeLocalIPv4(network.Gateway, label+" gateway")
-		if err != nil {
-			return nil, err
-		}
-		network.Subnet, err = normalizeLocalIPv4CIDR(network.Subnet, label+" subnet")
-		if err != nil {
-			return nil, err
-		}
-		network.SearchDomain, err = normalizeLocalSearchDomain(network.SearchDomain, label+" search domain")
-		if err != nil {
-			return nil, err
-		}
-		if network.SSID == "" && network.Gateway == "" && network.Subnet == "" && network.SearchDomain == "" {
-			return nil, fmt.Errorf("%s must configure at least one matching field", label)
-		}
-		normalized = append(normalized, network)
-	}
-	return normalized, nil
-}
-
-func (legacy legacyDomainLocalNetwork) profiles() []DomainLocalNetwork {
-	profiles := make([]DomainLocalNetwork, 0, 2)
-	if legacy.WifiName != "" || legacy.WifiGateway != "" || legacy.WifiSubnet != "" || legacy.WifiSearchDomain != "" {
-		profiles = append(profiles, DomainLocalNetwork{Type: "wifi", SSID: legacy.WifiName, Gateway: legacy.WifiGateway, Subnet: legacy.WifiSubnet, SearchDomain: legacy.WifiSearchDomain})
-	}
-	if legacy.EthGateway != "" || legacy.EthSubnet != "" || legacy.EthSearchDomain != "" {
-		profiles = append(profiles, DomainLocalNetwork{Type: "ethernet", Gateway: legacy.EthGateway, Subnet: legacy.EthSubnet, SearchDomain: legacy.EthSearchDomain})
-	}
-	return profiles
-}
-
-func legacyLocalNetwork(networks []DomainLocalNetwork) legacyDomainLocalNetwork {
-	var legacy legacyDomainLocalNetwork
-	for _, network := range networks {
-		switch network.Type {
-		case "wifi":
-			if legacy.WifiName == "" && legacy.WifiGateway == "" && legacy.WifiSubnet == "" && legacy.WifiSearchDomain == "" {
-				legacy.WifiName = network.SSID
-				legacy.WifiGateway = network.Gateway
-				legacy.WifiSubnet = network.Subnet
-				legacy.WifiSearchDomain = network.SearchDomain
-			}
-		case "ethernet":
-			if legacy.EthGateway == "" && legacy.EthSubnet == "" && legacy.EthSearchDomain == "" {
-				legacy.EthGateway = network.Gateway
-				legacy.EthSubnet = network.Subnet
-				legacy.EthSearchDomain = network.SearchDomain
-			}
-		}
-	}
-	return legacy
-}
-
-func (legacy legacyDomainLocalNetwork) empty() bool {
-	return len(legacy.profiles()) == 0
-}
-
-func (d Domain) MarshalJSON() ([]byte, error) {
-	type domainAlias Domain
-	legacy := legacyLocalNetwork(d.LocalNetworks)
-	var legacyPtr *legacyDomainLocalNetwork
-	if !legacy.empty() {
-		legacyPtr = &legacy
-	}
-	return json.Marshal(struct {
-		domainAlias
-		LocalNetwork *legacyDomainLocalNetwork `json:"local_network,omitempty"`
-	}{domainAlias: domainAlias(d), LocalNetwork: legacyPtr})
-}
-
-func (d *Domain) UnmarshalJSON(data []byte) error {
-	type domainAlias Domain
-	wire := struct {
-		domainAlias
-		LocalNetwork legacyDomainLocalNetwork `json:"local_network,omitempty"`
-	}{}
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return err
-	}
-	*d = Domain(wire.domainAlias)
-	if d.LocalNetworks == nil {
-		d.LocalNetworks = wire.LocalNetwork.profiles()
-	}
-	return nil
-}
-
-func normalizeLocalIPv4(raw, label string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
-	}
-	addr, err := netip.ParseAddr(raw)
-	if err != nil || !addr.Is4() {
-		return "", fmt.Errorf("%s must be an IPv4 address", label)
-	}
-	return addr.String(), nil
-}
-
-func normalizeLocalIPv4CIDR(raw, label string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
-	}
-	prefix, err := netip.ParsePrefix(raw)
-	if err != nil || !prefix.Addr().Is4() {
-		return "", fmt.Errorf("%s must be an IPv4 CIDR", label)
-	}
-	return prefix.Masked().String(), nil
-}
-
-func normalizeLocalSearchDomain(raw, label string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
-	}
-	normalized, err := normalizeHostname(raw)
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", label, err)
-	}
-	return normalized, nil
+	settings := domain.VPNSettings()
+	settings.DNSServers = dns
+	settings.SearchDomain = searchDomain
+	return normalizeVPNSettings(settings)
 }
 
 func generatedDomainSettings(seed VPNSettings, index int, dns []string, searchDomain string) (VPNSettings, error) {
@@ -677,7 +514,14 @@ func generatedDomainSettings(seed VPNSettings, index int, dns []string, searchDo
 	if err != nil {
 		return VPNSettings{}, err
 	}
-	return normalizeVPNSettings(VPNSettings{WGCIDR: network4.String(), WGServerIP: server4.String(), WGIPv6CIDR: network6.String(), WGIPv6ServerIP: server6.String(), DNSServers: dns, SearchDomain: searchDomain})
+	return normalizeVPNSettings(VPNSettings{
+		WGCIDR:         network4.String(),
+		WGServerIP:     server4.String(),
+		WGIPv6CIDR:     network6.String(),
+		WGIPv6ServerIP: server6.String(),
+		DNSServers:     dns,
+		SearchDomain:   searchDomain,
+	})
 }
 
 func domainInterfaceSettings(domains []Domain, fallback VPNSettings) (VPNSettings, error) {

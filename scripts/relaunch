@@ -38,17 +38,6 @@ append_lines() {
 	done <<<"$text"
 }
 
-env_value() {
-	local key="$1"
-	local line=""
-	for line in "${env_lines[@]}"; do
-		case "$line" in
-			"$key="*) printf '%s' "${line#*=}"; return 0 ;;
-		esac
-	done
-	return 1
-}
-
 has_sysctl() {
 	local key="$1"
 	local line=""
@@ -89,9 +78,13 @@ devices=()
 sysctls=()
 append_lines env_lines "$(inspect_value '{{range .Config.Env}}{{println .}}{{end}}' "$container_name")"
 append_lines binds "$(inspect_value '{{range .HostConfig.Binds}}{{println .}}{{end}}' "$container_name")"
+# Dollar variables here belong to the Go template.
+# shellcheck disable=SC2016
 append_lines ports "$(inspect_value '{{range $container, $bindings := .HostConfig.PortBindings}}{{range $bindings}}{{if .HostIp}}{{.HostIp}}:{{end}}{{.HostPort}}:{{$container}}{{println}}{{end}}{{end}}' "$container_name")"
 append_lines caps "$(inspect_value '{{range .HostConfig.CapAdd}}{{println .}}{{end}}' "$container_name")"
 append_lines devices "$(inspect_value '{{range .HostConfig.Devices}}{{.PathOnHost}}:{{.PathInContainer}}{{if .CgroupPermissions}}:{{.CgroupPermissions}}{{end}}{{println}}{{end}}' "$container_name")"
+# Dollar variables here belong to the Go template.
+# shellcheck disable=SC2016
 append_lines sysctls "$(inspect_value '{{range $key, $value := .HostConfig.Sysctls}}{{printf "%s=%s\n" $key $value}}{{end}}' "$container_name")"
 
 if [ "${#binds[@]}" -eq 0 ]; then

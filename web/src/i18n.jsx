@@ -18,7 +18,9 @@ const browserLocale = () => {
     if (supportedLocale(saved)) return saved
     const browser = navigator.language.split('-')[0].toLowerCase()
     return supportedLocale(browser) ? browser : 'en'
-  } catch { return 'en' }
+  } catch {
+    return 'en'
+  }
 }
 
 let activeLocale = browserLocale()
@@ -33,13 +35,24 @@ export function formatDate(value) {
 }
 
 const statusKeys = {
-  local: 'ui.status_local', non_local: 'ui.status_non_local', indeterminate: 'ui.status_indeterminate',
-  activated: 'ui.status_activated', deactivated: 'ui.status_deactivated', no_op: 'ui.status_no_op',
-  failed: 'ui.status_failed', complete: 'ui.status_complete', running: 'ui.status_running',
-  matched: 'ui.status_matched', mismatch: 'ui.status_mismatch', up: 'ui.status_up', down: 'ui.status_down',
+  local: 'ui.status_local',
+  non_local: 'ui.status_non_local',
+  indeterminate: 'ui.status_indeterminate',
+  activated: 'ui.status_activated',
+  deactivated: 'ui.status_deactivated',
+  no_op: 'ui.status_no_op',
+  failed: 'ui.status_failed',
+  complete: 'ui.status_complete',
+  running: 'ui.status_running',
+  matched: 'ui.status_matched',
+  mismatch: 'ui.status_mismatch',
+  up: 'ui.status_up',
+  down: 'ui.status_down',
 }
 
-export function statusLabel(value) { return statusKeys[value] ? t(statusKeys[value]) : value }
+export function statusLabel(value) {
+  return statusKeys[value] ? t(statusKeys[value]) : value
+}
 
 // Handles values produced by existing UI code; new UI text should use t(key).
 export function tr(value) {
@@ -59,7 +72,9 @@ export function tr(value) {
   if (grants) return t('ui.grants', { count: grants[1] })
   const edit = match[2].match(/^Edit (.+)$/)
   if (edit) return t('ui.edit_named', { name: edit[1] })
-  const peerRemoval = match[2].match(/^Remove (.+) and its WireGuard key\? This cannot be undone\.$/)
+  const peerRemoval = match[2].match(
+    /^Remove (.+) and its WireGuard key\? This cannot be undone\.$/,
+  )
   if (peerRemoval) return t('ui.remove_peer_confirmation', { name: peerRemoval[1] })
   const remoteRemoval = match[2].match(/^Delete (.+) and stop its site-to-site connection\?$/)
   if (remoteRemoval) return t('ui.remove_remote_confirmation', { name: remoteRemoval[1] })
@@ -77,16 +92,31 @@ export function LocaleProvider({ children }) {
     if (!supportedLocale(next)) return
     activeLocale = next
     document.documentElement.lang = next
-    try { localStorage.setItem('bruecke-locale', next) } catch { /* Storage may be unavailable. */ }
+    try {
+      localStorage.setItem('bruecke-locale', next)
+    } catch {
+      /* Storage may be unavailable. */
+    }
     changeLocale(next)
   }
   document.documentElement.lang = locale
   return <LocaleContext.Provider value={{ locale, setLocale }}>{children}</LocaleContext.Provider>
 }
 
-export function useLocale() { return useContext(LocaleContext) }
+export function useLocale() {
+  return useContext(LocaleContext)
+}
 
 export function LanguageSwitcher() {
   const { locale, setLocale } = useLocale()
-  return <SelectField className="language-switcher" label={t('ui.language')} hideLabel value={locale} onChange={setLocale} options={languages.map(({ code, label }) => ({ value: code, label }))} />
+  return (
+    <SelectField
+      className="language-switcher"
+      label={t('ui.language')}
+      hideLabel
+      value={locale}
+      onChange={setLocale}
+      options={languages.map(({ code, label }) => ({ value: code, label }))}
+    />
+  )
 }

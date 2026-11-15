@@ -125,7 +125,7 @@ func TestAdminDeleteClientRemovesPeerAndAssignments(t *testing.T) {
 	wg := &recordingDeleteWireGuard{}
 	runtime := &recordingRemoteSyncer{}
 	app := NewServer(Config{}, ServerDependencies{Clients: store, WireGuard: wg, RemoteSubnets: remote, RemoteRuntime: runtime})
-	app.sess["token"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
+	app.sessions["token"] = adminSession{ExpiresAt: time.Now().Add(time.Hour)}
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/admin/clients/"+client.ID, nil)
 	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: "token"})

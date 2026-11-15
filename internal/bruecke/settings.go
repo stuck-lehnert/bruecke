@@ -96,19 +96,7 @@ func (s *SettingsStore) Set(settings VPNSettings) (VPNSettings, error) {
 }
 
 func (s *SettingsStore) saveLocked() error {
-	data, err := json.MarshalIndent(s.settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode settings: %w", err)
-	}
-	data = append(data, '\n')
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write settings: %w", err)
-	}
-	if err := os.Rename(tmp, s.path); err != nil {
-		return fmt.Errorf("replace settings: %w", err)
-	}
-	return nil
+	return writeJSONFile(s.path, "settings", s.settings)
 }
 
 func SeedVPNSettings(cfg Config) VPNSettings {

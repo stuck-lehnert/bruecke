@@ -7,8 +7,7 @@ import (
 
 func (s *Server) handleAdminSSHClients(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		methodNotAllowed(w, http.MethodPost)
 		return
 	}
 	var req struct {
@@ -36,8 +35,13 @@ func (s *Server) handleAdminSSHClients(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client, err := s.store.Rotate(r.Context(), Enrollment{
-		Type: "ssh", Hostname: hostname, DomainID: domain.ID, DomainName: domain.Name,
-		PublicKey: publicKey, Settings: domain.VPNSettings(), IssuedAt: s.now(),
+		Type:       "ssh",
+		Hostname:   hostname,
+		DomainID:   domain.ID,
+		DomainName: domain.Name,
+		PublicKey:  publicKey,
+		Settings:   domain.VPNSettings(),
+		IssuedAt:   s.now(),
 	}, nil)
 	if errors.Is(err, ErrClientExists) {
 		http.Error(w, err.Error(), http.StatusConflict)

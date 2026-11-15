@@ -103,7 +103,7 @@ func TestVPNEventUploadAuthAndAdminRead(t *testing.T) {
 		t.Fatalf("upload status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	app.sess["admin"] = adminSession{ExpiresAt: now.Add(time.Hour)}
+	app.sessions["admin"] = adminSession{ExpiresAt: now.Add(time.Hour)}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/admin/vpn-events?client_id=pc1%7Cdomain%3Atest&decision=local&outcome=deactivated", nil)
 	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: "admin"})
