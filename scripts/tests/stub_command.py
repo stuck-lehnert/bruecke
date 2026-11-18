@@ -108,7 +108,11 @@ def run_command(command, arguments, state):
             subprocess.run(["sh", "-n"], input=shell_source, text=True, check=True)
             state["shell_programs"] = state.get("shell_programs", 0) + 1
         if arguments[0] == "inspect":
-            print("fd89:89::10" if "GlobalIPv6Address" in " ".join(arguments) else "10.231.0.10")
+            if "relaunch_inspect" in state:
+                if arguments[1] == "--format":
+                    print(state["relaunch_inspect"].get(arguments[2], ""))
+            else:
+                print("fd89:89::10" if "GlobalIPv6Address" in " ".join(arguments) else "10.231.0.10")
         elif "wg genkey" in shell_source:
             print("server-key")
         elif "htpasswd" in shell_source:

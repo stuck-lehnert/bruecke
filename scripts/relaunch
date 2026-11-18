@@ -49,6 +49,41 @@ has_sysctl() {
 	return 1
 }
 
+container_env_value() {
+	local key="$1" line value
+	for line in "${env_lines[@]}"; do
+		if [[ "$line" == "$key="* ]]; then
+			value=${line#*=}
+			value=${value#"${value%%[![:space:]]*}"}
+			value=${value%"${value##*[![:space:]]}"}
+			printf '%s' "$value"
+			return
+		fi
+	done
+}
+
+publish_default_ssh_port() {
+	local port
+	case "$network_mode" in
+		host|none|container:*|ns:*|pod:*) return ;;
+	esac
+	case "$(container_env_value BRUECKE_SSH_ENABLED)" in
+		''|1|t|T|true|True|TRUE) ;;
+		*) return ;;
+	esac
+	case "$(container_env_value BRUECKE_SSH_ADDR)" in
+		''|:8888) ;;
+		*) return ;;
+	esac
+	for port in "${ports[@]}"; do
+		case "$port" in
+			*:8888/tcp|8888:*/tcp|*:8888:*/tcp) return ;;
+		esac
+	done
+	ports+=(8888:8888/tcp)
+	printf '%s\n' 'publishing SSH jump host on TCP port 8888'
+}
+
 script_path="${BASH_SOURCE[0]}"
 script_dir="${script_path%/*}"
 if [ "$script_dir" = "$script_path" ]; then
@@ -138,6 +173,7 @@ done
 for sysctl in "${sysctls[@]}"; do
 	run_args+=(--sysctl "$sysctl")
 done
+publish_default_ssh_port
 for port in "${ports[@]}"; do
 	run_args+=(-p "$port")
 done

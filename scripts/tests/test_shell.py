@@ -166,6 +166,41 @@ class ShellScriptTests(unittest.TestCase):
         ]
         self.assertEqual(unexpected_calls, [])
 
+    def test_relaunch_publishes_missing_default_ssh_port(self):
+        cases = (
+            ("legacy", "", "bridge", "443:443/tcp\n8888:51820/udp", True),
+            ("existing", "", "bridge", "8888:8888/tcp", False),
+            ("custom mapping", "", "bridge", "127.0.0.1:18888:8888/tcp", False),
+            ("occupied TCP port", "", "bridge", "127.0.0.1:8888:8080/tcp", False),
+            ("disabled", "BRUECKE_SSH_ENABLED=  False  ", "bridge", "443:443/tcp", False),
+            ("custom address", "BRUECKE_SSH_ADDR=127.0.0.1:8888", "bridge", "443:443/tcp", False),
+            ("custom port", "BRUECKE_SSH_ADDR=:2222", "bridge", "443:443/tcp", False),
+            ("host network", "", "host", "", False),
+        )
+        for name, ssh_env, network, existing_ports, add_mapping in cases:
+            with self.subTest(name=name):
+                self.update_state(calls=[], relaunch_inspect={
+                    "{{.Config.Image}}": "bruecke:test",
+                    "{{range .Config.Env}}{{println .}}{{end}}": ssh_env,
+                    "{{.HostConfig.NetworkMode}}": network,
+                    "{{.State.Running}}": "true",
+                    ('{{range $container, $bindings := .HostConfig.PortBindings}}'
+                     '{{range $bindings}}{{if .HostIp}}{{.HostIp}}:{{end}}'
+                     '{{.HostPort}}:{{$container}}{{println}}{{end}}{{end}}'): existing_ports,
+                })
+                result = subprocess.run(
+                    ["bash", str(SCRIPTS / "relaunch")], cwd=self.root,
+                    env={**self.environment, "BRUECKE_RUNTIME": "docker", "BRUECKE_RELAUNCH_PULL": "false"},
+                    text=True, capture_output=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                run = next(call for call in self.state()["calls"] if call[:2] == ["docker", "run"])
+                published = [run[index + 1] for index, argument in enumerate(run) if argument == "-p"]
+                expected = existing_ports.splitlines()
+                if add_mapping:
+                    expected.append("8888:8888/tcp")
+                self.assertEqual(published, expected)
+
     def test_embedded_shell_programs_pass_static_checks(self):
         count = 0
         for script in ("dev", "interactive-liftoff", "test-e2e"):
